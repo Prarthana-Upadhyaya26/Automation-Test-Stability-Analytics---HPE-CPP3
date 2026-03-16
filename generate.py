@@ -203,7 +203,7 @@ def build_test_xml(test, n, is_anomaly, current_dt, rng):
         # duration of faliure other and inner kw is determined randomly within a range to create more realistic variability in the logs, rather than having all failures occur at the same point in time.
         if category == "stable":
             ftype = "environment"
-        if prim_prob is None:
+        elif prim_prob is None:
             ftype = primary or "timeout"
         else:
             ftype = primary if rng.random() < prim_prob else secondary
