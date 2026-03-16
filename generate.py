@@ -72,11 +72,21 @@ def gen_data_msg(rng):
     ranges = ["Oct 2024", "last 30 days", "Q4 2024", "last 7 days"]
     return f"CSV export contained {rng.choice(rows)} rows — expected at least {rng.choice(mins)} records for {rng.choice(ranges)}"
 
+def gen_environment_msg(rng):
+    messages = [
+        "Connection refused — test environment unreachable",
+        "Timeout waiting for application server to respond",
+        "Suite setup failed — environment health check failed",
+        "Unable to launch browser — infrastructure error",
+    ]
+    return rng.choice(messages)
+
 FAIL_GEN = {
     "timeout":   gen_timeout_msg,
     "element":   gen_element_msg,
     "assertion": gen_assertion_msg,
     "data":      gen_data_msg,
+    "environment": gen_environment_msg
 }
 
 # keyword names used in inner <kw> for each failure type
@@ -85,6 +95,7 @@ FAIL_KW = {
     "element":   "Click Element",
     "assertion": "Should Be Equal As Integers",
     "data":      "Should Not Be Empty",
+    "environment": "Environment_Setup"
 }
 
 # PASS RATE CURVE  (applies to stable + consistently_failing; flaky uses own prob)
@@ -190,6 +201,8 @@ def build_test_xml(test, n, is_anomaly, current_dt, rng):
         outer_status = f'      <status status="PASS" starttime="{start_s}" endtime="{end_s}"/>\n'
     else:
         # duration of faliure other and inner kw is determined randomly within a range to create more realistic variability in the logs, rather than having all failures occur at the same point in time.
+        if category == "stable":
+            ftype = "environment"
         if prim_prob is None:
             ftype = primary or "timeout"
         else:
