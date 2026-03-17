@@ -1,0 +1,12 @@
+{
+  "team": "TeamAlpha",
+  "suite": "Suite_Regression_TeamAlpha",
+  "build_no": 4,
+  "timestamp": "2024-10-04T00:00:00",
+  "total": 20,
+  "passed": 11,
+  "failed": 9,
+  "pass_rate_pct": 55.0,
+  "environment": "staging",
+  "executor": "jenkins-agent-07"
+}
