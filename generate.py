@@ -1,4 +1,3 @@
-
 """
 Usage:
     python generate.py
@@ -10,6 +9,7 @@ import json
 import os
 import random
 from datetime import datetime, timedelta
+import xml.etree.ElementTree as ET
 
 # CONFIG
 DEFAULT_CONFIG = {
@@ -48,6 +48,20 @@ TESTS = [
     ("s1-t19", "TC_User_BatchExport",         "feature_usermgmt",   "priority_medium", "consistently_failing",0.75, "normal",            "data",      "element",   0.65),
     ("s1-t20", "TC_Login_OAuthCallback",      "feature_login",      "priority_high",   "consistently_failing",0.70, "normal",            "timeout",   "element",   0.70),
 ]
+
+# DEPENDENCY MODEL
+# Each entry maps a test name to the upstream tests it depends on and a
+# propagation weight.  If any dependency failed, the test's own fail_prob
+# is raised via a multiplicative risk model before decide_outcome() is called:
+#   effective_fail_prob = 1 - (1 - base_fail_prob) * (1 - weight * failed_dep_count)
+# Result is clamped to 0.95 so no test is guaranteed to fail.
+DEPENDENCIES = {
+    "TC_Dashboard_FilterByDate": {"deps": ["TC_Login_ValidCredentials"],   "weight": 0.4},
+    "TC_Dashboard_Pagination":   {"deps": ["TC_Login_ValidCredentials"],   "weight": 0.4},
+    "TC_Dashboard_ExportChart":  {"deps": ["TC_Dashboard_FilterByDate"],   "weight": 0.5},
+    "TC_Dashboard_LoadWidget":   {"deps": ["TC_Login_ValidCredentials"],   "weight": 0.6},
+    "TC_User_BulkImport":        {"deps": ["TC_User_CreateAccount"],       "weight": 0.5},
+}
 
 # FAILURE MESSAGE GENERATORS
 def gen_timeout_msg(rng):
@@ -103,10 +117,10 @@ def run_pass_rate(n, anomaly_runs, anomaly_pass_rate):
     """Return the suite-level pass-rate target for run n (1-indexed)."""
     if n in anomaly_runs:
         return anomaly_pass_rate
-    if   1  <= n <= 25: return random.uniform(0.60, 0.70)
-    elif 26 <= n <= 35: return random.uniform(0.55, 0.65)
-    elif 38 <= n <= 45: return random.uniform(0.50, 0.55)
-    elif 46 <= n <= 75: return random.uniform(0.55, 0.80)
+    if   1  <= n <= 25: return random.uniform(0.70, 0.80)
+    elif 26 <= n <= 35: return random.uniform(0.65, 0.72)
+    elif 38 <= n <= 45: return random.uniform(0.60, 0.65)
+    elif 46 <= n <= 75: return random.uniform(0.65, 0.80)
     else:               return random.uniform(0.82, 0.95)
 
 # DURATION PATTERNS
@@ -147,14 +161,12 @@ def fmt_ts(dt):
     """Format datetime as Robot Framework timestamp string."""
     return dt.strftime("%Y%m%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
 
-#-------------need to improve since not implementing the probablity of failure for flaky tests correctly, currently just adding a flat 30% to the fail_prob which is not ideal, should be using the run_pass_rate function to determine the overall pass rate for the run and then adjusting the fail_prob for flaky tests accordingly to meet that target pass rate while also respecting the relative failure rates of each test. This is a bit more complex but would produce more realistic data. Also Differentiate between flaky-mild, flaky-moderate, and flaky-heavy in how much they deviate from their base fail_prob, rather than using the same adjustment for all flaky categories.
-
 # DECIDE TEST OUTCOME
 def decide_outcome(category, fail_prob, is_anomaly, rng):
     """Return True if test passes."""
     if is_anomaly:
         if category == "stable":
-            return rng.random() > 0.60
+            return rng.random() > 0.80
         if category in ("flaky-mild", "flaky-moderate", "flaky-heavy"):
             return rng.random() > min(fail_prob + 0.30, 0.95)
         if category == "consistently_failing":
@@ -172,67 +184,114 @@ def decide_outcome(category, fail_prob, is_anomaly, rng):
 #--------------
 
 # XML BUILDERS
-def build_test_xml(test, n, is_anomaly, current_dt, rng):
+def _indent(elem, level=0):
+    """Add pretty-print whitespace to an ET element tree in-place."""
+    pad = "\n" + "  " * level
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = pad + "  "
+        for child in elem:
+            _indent(child, level + 1)
+            if not child.tail or not child.tail.strip():
+                child.tail = pad + "  "
+        if not child.tail or not child.tail.strip():
+            child.tail = pad
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = pad
+
+
+def build_test_xml(test, passed, n, is_anomaly, current_dt, rng, force_fail=False, force_pass=False):
     tid, name, feature_tag, priority_tag, category, fail_prob, _, primary, secondary, prim_prob = test
 
-    status = "PASS" if decide_outcome(category, fail_prob, is_anomaly, rng) else "FAIL"
+    if force_fail:
+        status = "FAIL"
+    elif force_pass:
+        status = "PASS"
+    else:
+        status = "PASS" if passed else "FAIL"
 
     dur = test_duration(name, n, status, rng)
     start_dt = current_dt
     end_dt   = start_dt + timedelta(seconds=dur)
 
-    start_s = fmt_ts(start_dt)
-    end_s   = fmt_ts(end_dt)
-    info_ts = fmt_ts(start_dt + timedelta(milliseconds=200))
+    start_s  = fmt_ts(start_dt)
+    end_s    = fmt_ts(end_dt)
+    info_ts  = fmt_ts(start_dt + timedelta(milliseconds=200))
 
-    tags_xml = (
-        f'      <tag>alpha_regression</tag>\n'
-        f'      <tag>{feature_tag}</tag>\n'
-        f'      <tag>{priority_tag}</tag>\n'
-    )
+    test_el = ET.Element("test")
+    test_el.set("id", tid)
+    test_el.set("name", name)
+
+    ET.SubElement(test_el, "tag").text = "alpha_regression"
+    ET.SubElement(test_el, "tag").text = feature_tag
+    ET.SubElement(test_el, "tag").text = priority_tag
+
+    kw = ET.SubElement(test_el, "kw")
+    kw.set("name", "Run Test Steps")
+    kw.set("library", "SeleniumLibrary")
+
+    info_msg = ET.SubElement(kw, "msg")
+    info_msg.set("timestamp", info_ts)
+    info_msg.set("level", "INFO")
+    info_msg.text = f"Executing {name}"
 
     if status == "PASS":
-        kw_xml = (
-            f'      <kw name="Run Test Steps" library="SeleniumLibrary">\n'
-            f'        <msg timestamp="{info_ts}" level="INFO">Executing {name}</msg>\n'
-            f'        <status status="PASS" starttime="{start_s}" endtime="{end_s}"/>\n'
-            f'      </kw>\n'
-        )
-        outer_status = f'      <status status="PASS" starttime="{start_s}" endtime="{end_s}"/>\n'
+        kw_status = ET.SubElement(kw, "status")
+        kw_status.set("status", "PASS")
+        kw_status.set("starttime", start_s)
+        kw_status.set("endtime", end_s)
+
+        outer_status = ET.SubElement(test_el, "status")
+        outer_status.set("status", "PASS")
+        outer_status.set("starttime", start_s)
+        outer_status.set("endtime", end_s)
     else:
-        # duration of faliure other and inner kw is determined randomly within a range to create more realistic variability in the logs, rather than having all failures occur at the same point in time.
+        # duration of failure outer and inner kw is determined randomly within a range
+        # to create more realistic variability in the logs
         if category == "stable":
             ftype = "environment"
         elif prim_prob is None:
             ftype = primary or "timeout"
         else:
             ftype = primary if rng.random() < prim_prob else secondary
-        fail_msg = FAIL_GEN[ftype](rng)
-        fail_ts  = fmt_ts(end_dt - timedelta(milliseconds=rng.randint(5, 50)))
-        inner_kw = FAIL_KW[ftype]
-        inner_start = fmt_ts(end_dt - timedelta(milliseconds=rng.randint(50, 100)))
 
-        kw_xml = (
-            f'      <kw name="Run Test Steps" library="SeleniumLibrary">\n'
-            f'        <msg timestamp="{info_ts}" level="INFO">Executing {name}</msg>\n'
-            f'        <msg timestamp="{fail_ts}" level="FAIL">{fail_msg}</msg>\n'
-            f'        <status status="FAIL" starttime="{start_s}" endtime="{end_s}"/>\n'
-            f'      </kw>\n'
-            f'      <kw name="{inner_kw}" library="BuiltIn">\n'
-            f'        <msg timestamp="{fail_ts}" level="FAIL">{fail_msg}</msg>\n'
-            f'        <status status="FAIL" starttime="{inner_start}" endtime="{fail_ts}"/>\n'
-            f'      </kw>\n'
-        )
-        outer_status = f'      <status status="FAIL" starttime="{start_s}" endtime="{end_s}">{fail_msg}</status>\n'
+        fail_msg       = FAIL_GEN[ftype](rng)
+        fail_ts        = fmt_ts(end_dt - timedelta(milliseconds=rng.randint(5, 50)))
+        inner_kw_name  = FAIL_KW[ftype]
+        inner_start    = fmt_ts(end_dt - timedelta(milliseconds=rng.randint(50, 100)))
 
-    xml = (
-        f'    <test id="{tid}" name="{name}">\n'
-        f'{tags_xml}'
-        f'{kw_xml}'
-        f'{outer_status}'
-        f'    </test>\n'
-    )
-    return xml, status, end_dt
+        fail_msg_el = ET.SubElement(kw, "msg")
+        fail_msg_el.set("timestamp", fail_ts)
+        fail_msg_el.set("level", "FAIL")
+        fail_msg_el.text = fail_msg
+
+        kw_status = ET.SubElement(kw, "status")
+        kw_status.set("status", "FAIL")
+        kw_status.set("starttime", start_s)
+        kw_status.set("endtime", end_s)
+
+        inner_kw = ET.SubElement(test_el, "kw")
+        inner_kw.set("name", inner_kw_name)
+        inner_kw.set("library", "BuiltIn")
+
+        inner_msg = ET.SubElement(inner_kw, "msg")
+        inner_msg.set("timestamp", fail_ts)
+        inner_msg.set("level", "FAIL")
+        inner_msg.text = fail_msg
+
+        inner_status = ET.SubElement(inner_kw, "status")
+        inner_status.set("status", "FAIL")
+        inner_status.set("starttime", inner_start)
+        inner_status.set("endtime", fail_ts)
+
+        outer_status = ET.SubElement(test_el, "status")
+        outer_status.set("status", "FAIL")
+        outer_status.set("starttime", start_s)
+        outer_status.set("endtime", end_s)
+        outer_status.text = fail_msg
+
+    return test_el, status, end_dt
 
 
 def build_run(n, config, rng):
@@ -245,61 +304,140 @@ def build_run(n, config, rng):
     suite_start  = run_dt
     #------------------------------
 
-    # Suite setup
+    # Root element
+    root = ET.Element("robot")
+    root.set("generator", "Robot 6.1.1 (Python 3.10.12)")
+    root.set("generated", generated_s)
+    root.set("rpa", "FALSE")
+    root.set("schemaversion", "4")
+
+    # Suite element
+    suite = ET.SubElement(root, "suite")
+    suite.set("id", "s1")
+    suite.set("name", config["suite_name"])
+    suite.set("source", f"/opt/ci/tests/alpha/{config['suite_name']}.robot")
+
+    # Suite setup kw
     setup_end = suite_start + timedelta(milliseconds=110)
-    suite_xml = (
-        f'  <suite id="s1" name="{config["suite_name"]}" '
-        f'source="/opt/ci/tests/alpha/{config["suite_name"]}.robot">\n'
-        f'    <kw name="Suite Setup" type="setup">\n'
-        f'      <msg timestamp="{generated_s}" level="INFO">'
-        f'Suite {config["suite_name"]} initialized — team {config["team_name"]}</msg>\n'
-        f'      <status status="PASS" starttime="{generated_s}" endtime="{fmt_ts(setup_end)}"/>\n'
-        f'    </kw>\n'
-    )
+    kw_setup = ET.SubElement(suite, "kw")
+    kw_setup.set("name", "Suite Setup")
+    kw_setup.set("type", "setup")
+
+    setup_msg = ET.SubElement(kw_setup, "msg")
+    setup_msg.set("timestamp", generated_s)
+    setup_msg.set("level", "INFO")
+    setup_msg.text = f"Suite {config['suite_name']} initialized — team {config['team_name']}"
+
+    setup_status = ET.SubElement(kw_setup, "status")
+    setup_status.set("status", "PASS")
+    setup_status.set("starttime", generated_s)
+    setup_status.set("endtime", fmt_ts(setup_end))
 
     cursor = setup_end + timedelta(milliseconds=200)
     passed = 0
     failed = 0
-    tests_xml = ""
+
+    target_pass_rate = run_pass_rate(n, config["anomaly_runs"], config["anomaly_pass_rate"])
+    total_tests = len(TESTS)
+    target_failures = round(total_tests * (1 - target_pass_rate))
+    results = []
+    natural_outcomes = {}   # name -> bool (True = pass), built as we go for dependency lookups
 
     for test in TESTS:
-        t_xml, status, cursor = build_test_xml(test, n, is_anomaly, cursor, rng)
-        tests_xml += t_xml
+        tid, name, feature_tag, priority_tag, category, fail_prob, *_ = test
+
+        # Apply dependency risk model before rolling the outcome.
+        # If any upstream test already failed this run, raise the effective
+        # fail_prob via the multiplicative model then clamp to 0.95.
+        dep_info = DEPENDENCIES.get(name)
+        if dep_info:
+            failed_dep_count = sum(
+                1 for dep in dep_info["deps"]
+                if natural_outcomes.get(dep) is False
+            )
+            if failed_dep_count > 0:
+                fail_prob = 1 - (1 - fail_prob) * (1 - dep_info["weight"] * failed_dep_count)
+                fail_prob = min(fail_prob, 0.95)
+
+        outcome = decide_outcome(category, fail_prob, is_anomaly, rng)
+        natural_outcomes[name] = outcome
+        results.append((test, outcome))
+
+    natural_failures = sum(1 for _, outcome in results if not outcome)
+
+    # --- Bidirectional correction to hit target_pass_rate ---
+    extra_failures_needed = target_failures - natural_failures
+
+    force_fail_indices = set()
+    force_pass_indices = set()
+
+    if extra_failures_needed > 0:
+        # Too many passes — force some non-stable passing tests to fail
+        candidates = [
+            i for i, (test, outcome) in enumerate(results)
+            if outcome and test[4] != "stable"
+        ]
+        n_force = min(extra_failures_needed, len(candidates))
+        force_fail_indices = set(rng.sample(candidates, n_force))
+
+    elif extra_failures_needed < 0:
+        # Too many failures — force some failing tests to pass
+        # Prefer flaky tests (more believable they recovered) over consistently_failing
+        extra_passes_needed = -extra_failures_needed
+        candidates_flaky = [
+            i for i, (test, outcome) in enumerate(results)
+            if not outcome and test[4] in ("flaky-mild", "flaky-moderate", "flaky-heavy")
+        ]
+        candidates_cf = [
+            i for i, (test, outcome) in enumerate(results)
+            if not outcome and test[4] == "consistently_failing"
+        ]
+        # Fill from flaky first, then consistently_failing if still needed
+        chosen = []
+        for pool in (candidates_flaky, candidates_cf):
+            still_needed = extra_passes_needed - len(chosen)
+            if still_needed <= 0:
+                break
+            chosen += rng.sample(pool, min(still_needed, len(pool)))
+        force_pass_indices = set(chosen)
+
+    for i, (test, outcome) in enumerate(results):
+        force_fail = i in force_fail_indices
+        force_pass = i in force_pass_indices
+        test_el, status, cursor = build_test_xml(
+            test, outcome, n, is_anomaly, cursor, rng,
+            force_fail=force_fail, force_pass=force_pass
+        )
+        suite.append(test_el)
         cursor += timedelta(milliseconds=rng.randint(100, 300))
         if status == "PASS":
             passed += 1
         else:
             failed += 1
 
-    suite_status = "FAIL" if failed > 0 else "PASS"
-    suite_end_s  = fmt_ts(cursor)
+    suite_result = "FAIL" if failed > 0 else "PASS"
+    suite_status_el = ET.SubElement(suite, "status")
+    suite_status_el.set("status", suite_result)
+    suite_status_el.set("starttime", generated_s)
+    suite_status_el.set("endtime", fmt_ts(cursor))
+    suite_status_el.set("passed", str(passed))
+    suite_status_el.set("failed", str(failed))
 
-    suite_xml += tests_xml
-    suite_xml += (
-        f'    <status status="{suite_status}" starttime="{generated_s}" '
-        f'endtime="{suite_end_s}" passed="{passed}" failed="{failed}"/>\n'
-        f'  </suite>\n'
-    )
+    # Statistics
+    stats_el = ET.SubElement(root, "statistics")
+    total_el = ET.SubElement(stats_el, "total")
+    stat_all = ET.SubElement(total_el, "stat")
+    stat_all.set("pass", str(passed))
+    stat_all.set("fail", str(failed))
+    stat_all.text = "All Tests"
 
-    stats_xml = (
-        f'  <statistics>\n'
-        f'    <total>\n'
-        f'      <stat pass="{passed}" fail="{failed}">All Tests</stat>\n'
-        f'    </total>\n'
-        f'    <tag>\n'
-        f'      <stat pass="{passed}" fail="{failed}">alpha_regression</stat>\n'
-        f'    </tag>\n'
-        f'  </statistics>\n'
-        f'  <errors/>\n'
-    )
+    tag_el   = ET.SubElement(stats_el, "tag")
+    stat_tag = ET.SubElement(tag_el, "stat")
+    stat_tag.set("pass", str(passed))
+    stat_tag.set("fail", str(failed))
+    stat_tag.text = "alpha_regression"
 
-    full_xml = (
-        f'<robot generator="Robot 6.1.1 (Python 3.10.12)" '
-        f'generated="{generated_s}" rpa="FALSE" schemaversion="4">\n'
-        f'{suite_xml}'
-        f'{stats_xml}'
-        f'</robot>\n'
-    )
+    ET.SubElement(root, "errors")
 
     total = passed + failed
     meta = {
@@ -315,7 +453,7 @@ def build_run(n, config, rng):
         "executor":      f"jenkins-agent-{rng.randint(1,9):02d}",
     }
 
-    return full_xml, meta
+    return root, meta
 
 
 # MAIN─
@@ -332,8 +470,10 @@ def generate(config):
 
         xml, meta = build_run(n, config, rng)
 
+        _indent(xml)
+        tree = ET.ElementTree(xml)
         with open(os.path.join(folder, "output.xml"), "w", encoding="utf-8") as f:
-            f.write(xml)
+            tree.write(f, encoding="unicode", xml_declaration=False)
 
         with open(os.path.join(folder, "ci_metadata.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
