@@ -1,0 +1,243 @@
+<robot generator="Robot 6.1.1 (Python 3.10.12)" generated="20241207 00:00:00.000" rpa="FALSE" schemaversion="4">
+  <suite id="s1" name="Suite_Regression_TeamAlpha" source="/opt/ci/tests/alpha/Suite_Regression_TeamAlpha.robot">
+    <kw name="Suite Setup" type="setup">
+      <msg timestamp="20241207 00:00:00.000" level="INFO">Suite Suite_Regression_TeamAlpha initialized — team TeamAlpha</msg>
+      <status status="PASS" starttime="20241207 00:00:00.000" endtime="20241207 00:00:00.110" />
+    </kw>
+    <test id="s1-t1" name="TC_Login_ValidCredentials">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:00.510" level="INFO">Executing TC_Login_ValidCredentials</msg>
+        <status status="PASS" starttime="20241207 00:00:00.310" endtime="20241207 00:00:03.478" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:00.310" endtime="20241207 00:00:03.478" />
+    </test>
+    <test id="s1-t2" name="TC_Login_InvalidPassword">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:03.956" level="INFO">Executing TC_Login_InvalidPassword</msg>
+        <status status="PASS" starttime="20241207 00:00:03.756" endtime="20241207 00:00:08.945" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:03.756" endtime="20241207 00:00:08.945" />
+    </test>
+    <test id="s1-t3" name="TC_Login_SessionTimeout">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:09.345" level="INFO">Executing TC_Login_SessionTimeout</msg>
+        <status status="PASS" starttime="20241207 00:00:09.145" endtime="20241207 00:00:13.364" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:09.145" endtime="20241207 00:00:13.364" />
+    </test>
+    <test id="s1-t4" name="TC_Login_AccountLockout">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:13.779" level="INFO">Executing TC_Login_AccountLockout</msg>
+        <status status="PASS" starttime="20241207 00:00:13.579" endtime="20241207 00:00:14.961" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:13.579" endtime="20241207 00:00:14.961" />
+    </test>
+    <test id="s1-t5" name="TC_Login_MFAVerification">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:15.377" level="INFO">Executing TC_Login_MFAVerification</msg>
+        <status status="PASS" starttime="20241207 00:00:15.177" endtime="20241207 00:00:20.686" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:15.177" endtime="20241207 00:00:20.686" />
+    </test>
+    <test id="s1-t6" name="TC_Dashboard_FilterByDate">
+      <tag>alpha_regression</tag>
+      <tag>feature_dashboard</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:21.168" level="INFO">Executing TC_Dashboard_FilterByDate</msg>
+        <status status="PASS" starttime="20241207 00:00:20.968" endtime="20241207 00:00:28.707" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:20.968" endtime="20241207 00:00:28.707" />
+    </test>
+    <test id="s1-t7" name="TC_Dashboard_Pagination">
+      <tag>alpha_regression</tag>
+      <tag>feature_dashboard</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:29.123" level="INFO">Executing TC_Dashboard_Pagination</msg>
+        <status status="PASS" starttime="20241207 00:00:28.923" endtime="20241207 00:00:30.781" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:28.923" endtime="20241207 00:00:30.781" />
+    </test>
+    <test id="s1-t8" name="TC_Dashboard_ExportChart">
+      <tag>alpha_regression</tag>
+      <tag>feature_dashboard</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:31.163" level="INFO">Executing TC_Dashboard_ExportChart</msg>
+        <status status="PASS" starttime="20241207 00:00:30.963" endtime="20241207 00:00:45.038" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:30.963" endtime="20241207 00:00:45.038" />
+    </test>
+    <test id="s1-t9" name="TC_Dashboard_SearchBar">
+      <tag>alpha_regression</tag>
+      <tag>feature_dashboard</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:45.520" level="INFO">Executing TC_Dashboard_SearchBar</msg>
+        <status status="PASS" starttime="20241207 00:00:45.320" endtime="20241207 00:00:52.334" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:45.320" endtime="20241207 00:00:52.334" />
+    </test>
+    <test id="s1-t10" name="TC_User_CreateAccount">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:52.817" level="INFO">Executing TC_User_CreateAccount</msg>
+        <status status="PASS" starttime="20241207 00:00:52.617" endtime="20241207 00:00:59.170" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:52.617" endtime="20241207 00:00:59.170" />
+    </test>
+    <test id="s1-t11" name="TC_User_EditProfile">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:00:59.493" level="INFO">Executing TC_User_EditProfile</msg>
+        <status status="PASS" starttime="20241207 00:00:59.293" endtime="20241207 00:01:01.326" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:00:59.293" endtime="20241207 00:01:01.326" />
+    </test>
+    <test id="s1-t12" name="TC_User_DeleteAccount">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:01:01.741" level="INFO">Executing TC_User_DeleteAccount</msg>
+        <status status="PASS" starttime="20241207 00:01:01.541" endtime="20241207 00:01:07.370" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:01:01.541" endtime="20241207 00:01:07.370" />
+    </test>
+    <test id="s1-t13" name="TC_User_PasswordReset">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:01:07.691" level="INFO">Executing TC_User_PasswordReset</msg>
+        <status status="PASS" starttime="20241207 00:01:07.491" endtime="20241207 00:01:12.515" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:01:07.491" endtime="20241207 00:01:12.515" />
+    </test>
+    <test id="s1-t14" name="TC_Login_SSORedirect">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:01:12.913" level="INFO">Executing TC_Login_SSORedirect</msg>
+        <msg timestamp="20241207 00:01:33.931" level="FAIL">Element 'overlay-modal' still visible after 45s timeout</msg>
+        <status status="FAIL" starttime="20241207 00:01:12.713" endtime="20241207 00:01:33.971" />
+      </kw>
+      <kw name="Wait Until Element Is Visible" library="BuiltIn">
+        <msg timestamp="20241207 00:01:33.931" level="FAIL">Element 'overlay-modal' still visible after 45s timeout</msg>
+        <status status="FAIL" starttime="20241207 00:01:33.897" endtime="20241207 00:01:33.931" />
+      </kw>
+      <status status="FAIL" starttime="20241207 00:01:12.713" endtime="20241207 00:01:33.971">Element 'overlay-modal' still visible after 45s timeout</status>
+    </test>
+    <test id="s1-t15" name="TC_Dashboard_LoadWidget">
+      <tag>alpha_regression</tag>
+      <tag>feature_dashboard</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:01:34.282" level="INFO">Executing TC_Dashboard_LoadWidget</msg>
+        <status status="PASS" starttime="20241207 00:01:34.082" endtime="20241207 00:01:40.890" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:01:34.082" endtime="20241207 00:01:40.890" />
+    </test>
+    <test id="s1-t16" name="TC_Dashboard_RefreshData">
+      <tag>alpha_regression</tag>
+      <tag>feature_dashboard</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:01:41.275" level="INFO">Executing TC_Dashboard_RefreshData</msg>
+        <msg timestamp="20241207 00:01:57.982" level="FAIL">Expected HTTP status '200' but got '404' — Not Found</msg>
+        <status status="FAIL" starttime="20241207 00:01:41.075" endtime="20241207 00:01:57.998" />
+      </kw>
+      <kw name="Should Be Equal As Integers" library="BuiltIn">
+        <msg timestamp="20241207 00:01:57.982" level="FAIL">Expected HTTP status '200' but got '404' — Not Found</msg>
+        <status status="FAIL" starttime="20241207 00:01:57.899" endtime="20241207 00:01:57.982" />
+      </kw>
+      <status status="FAIL" starttime="20241207 00:01:41.075" endtime="20241207 00:01:57.998">Expected HTTP status '200' but got '404' — Not Found</status>
+    </test>
+    <test id="s1-t17" name="TC_User_BulkImport">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:01:58.480" level="INFO">Executing TC_User_BulkImport</msg>
+        <status status="PASS" starttime="20241207 00:01:58.280" endtime="20241207 00:02:26.690" />
+      </kw>
+      <status status="PASS" starttime="20241207 00:01:58.280" endtime="20241207 00:02:26.690" />
+    </test>
+    <test id="s1-t18" name="TC_User_RoleAssignment">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:02:27.068" level="INFO">Executing TC_User_RoleAssignment</msg>
+        <msg timestamp="20241207 00:02:43.002" level="FAIL">Expected HTTP status '200' but got '404' — Not Found</msg>
+        <status status="FAIL" starttime="20241207 00:02:26.868" endtime="20241207 00:02:43.014" />
+      </kw>
+      <kw name="Should Be Equal As Integers" library="BuiltIn">
+        <msg timestamp="20241207 00:02:43.002" level="FAIL">Expected HTTP status '200' but got '404' — Not Found</msg>
+        <status status="FAIL" starttime="20241207 00:02:42.956" endtime="20241207 00:02:43.002" />
+      </kw>
+      <status status="FAIL" starttime="20241207 00:02:26.868" endtime="20241207 00:02:43.014">Expected HTTP status '200' but got '404' — Not Found</status>
+    </test>
+    <test id="s1-t19" name="TC_User_BatchExport">
+      <tag>alpha_regression</tag>
+      <tag>feature_usermgmt</tag>
+      <tag>priority_medium</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:02:43.365" level="INFO">Executing TC_User_BatchExport</msg>
+        <msg timestamp="20241207 00:02:57.002" level="FAIL">CSV export contained 1 rows — expected at least 100 records for Oct 2024</msg>
+        <status status="FAIL" starttime="20241207 00:02:43.165" endtime="20241207 00:02:57.045" />
+      </kw>
+      <kw name="Should Not Be Empty" library="BuiltIn">
+        <msg timestamp="20241207 00:02:57.002" level="FAIL">CSV export contained 1 rows — expected at least 100 records for Oct 2024</msg>
+        <status status="FAIL" starttime="20241207 00:02:56.964" endtime="20241207 00:02:57.002" />
+      </kw>
+      <status status="FAIL" starttime="20241207 00:02:43.165" endtime="20241207 00:02:57.045">CSV export contained 1 rows — expected at least 100 records for Oct 2024</status>
+    </test>
+    <test id="s1-t20" name="TC_Login_OAuthCallback">
+      <tag>alpha_regression</tag>
+      <tag>feature_login</tag>
+      <tag>priority_high</tag>
+      <kw name="Run Test Steps" library="SeleniumLibrary">
+        <msg timestamp="20241207 00:02:57.405" level="INFO">Executing TC_Login_OAuthCallback</msg>
+        <msg timestamp="20241207 00:03:11.540" level="FAIL">Element 'auth-redirect' still visible after 15s timeout</msg>
+        <status status="FAIL" starttime="20241207 00:02:57.205" endtime="20241207 00:03:11.583" />
+      </kw>
+      <kw name="Wait Until Element Is Visible" library="BuiltIn">
+        <msg timestamp="20241207 00:03:11.540" level="FAIL">Element 'auth-redirect' still visible after 15s timeout</msg>
+        <status status="FAIL" starttime="20241207 00:03:11.495" endtime="20241207 00:03:11.540" />
+      </kw>
+      <status status="FAIL" starttime="20241207 00:02:57.205" endtime="20241207 00:03:11.583">Element 'auth-redirect' still visible after 15s timeout</status>
+    </test>
+    <status status="FAIL" starttime="20241207 00:00:00.000" endtime="20241207 00:03:11.684" passed="15" failed="5" />
+  </suite>
+  <statistics>
+    <total>
+      <stat pass="15" fail="5">All Tests</stat>
+    </total>
+    <tag>
+      <stat pass="15" fail="5">alpha_regression</stat>
+    </tag>
+  </statistics>
+  <errors />
+</robot>
