@@ -1,352 +1,481 @@
-
 """
 Usage:
     python generate.py
     python generate.py --output-dir ./runs --num-runs 100
+    python generate.py --seed 42  # for reproducible output
 """
 
-import argparse
-import json
 import os
+import json
 import random
+import argparse
 from datetime import datetime, timedelta
+import xml.etree.ElementTree as ET
 
-# CONFIG
-DEFAULT_CONFIG = {
+
+# all runtime parameters in one place, no magic numbers in logic below
+CONFIG = {
     "team_name":         "TeamAlpha",
     "suite_name":        "Suite_Regression_TeamAlpha",
     "num_runs":          100,
-    "anomaly_runs":      [36, 37],
+    "anomaly_runs":      [36, 37],   # these runs get a forced low pass rate
     "anomaly_pass_rate": 0.27,
     "start_date":        "2024-10-01",
     "interval_hours":    24,
     "output_dir":        "./runs",
-    "seed":              42,
+    "seed":              None,       # set an int for reproducible output
 }
 
-# TEST DEFINITIONS
-TESTS = [
-    # (id, name, feature_tag, priority_tag, category, fail_prob, duration_pattern, primary_fail, secondary_fail, primary_prob)
-    ("s1-t1",  "TC_Login_ValidCredentials",   "feature_login",      "priority_high",   "stable",              0.00, "seasonal",          None,        None,        None),
-    ("s1-t2",  "TC_Login_InvalidPassword",    "feature_login",      "priority_high",   "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t3",  "TC_Login_SessionTimeout",     "feature_login",      "priority_high",   "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t4",  "TC_Login_AccountLockout",     "feature_login",      "priority_medium", "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t5",  "TC_Login_MFAVerification",    "feature_login",      "priority_high",   "flaky-mild",          0.30, "normal",            "timeout",   "assertion", 0.70),
-    ("s1-t6",  "TC_Dashboard_FilterByDate",   "feature_dashboard",  "priority_medium", "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t7",  "TC_Dashboard_Pagination",     "feature_dashboard",  "priority_medium", "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t8",  "TC_Dashboard_ExportChart",    "feature_dashboard",  "priority_medium", "stable",              0.00, "step_change",       None,        None,        None),
-    ("s1-t9",  "TC_Dashboard_SearchBar",      "feature_dashboard",  "priority_medium", "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t10", "TC_User_CreateAccount",       "feature_usermgmt",   "priority_high",   "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t11", "TC_User_EditProfile",         "feature_usermgmt",   "priority_medium", "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t12", "TC_User_DeleteAccount",       "feature_usermgmt",   "priority_high",   "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t13", "TC_User_PasswordReset",       "feature_usermgmt",   "priority_medium", "stable",              0.00, "normal",            None,        None,        None),
-    ("s1-t14", "TC_Login_SSORedirect",        "feature_login",      "priority_high",   "flaky-mild",          0.35, "normal",            "timeout",   "element",   0.70),
-    ("s1-t15", "TC_Dashboard_LoadWidget",     "feature_dashboard",  "priority_medium", "flaky-moderate",      0.50, "normal",            "element",   "timeout",   0.80),
-    ("s1-t16", "TC_Dashboard_RefreshData",    "feature_dashboard",  "priority_medium", "flaky-moderate",      0.55, "normal",            "assertion", "data",      0.60),
-    ("s1-t17", "TC_User_BulkImport",          "feature_usermgmt",   "priority_medium", "flaky-heavy",         0.65, "progressive",       "data",      "assertion", 0.70),
-    ("s1-t18", "TC_User_RoleAssignment",      "feature_usermgmt",   "priority_high",   "consistently_failing",0.80, "normal",            "assertion", "data",      0.65),
-    ("s1-t19", "TC_User_BatchExport",         "feature_usermgmt",   "priority_medium", "consistently_failing",0.75, "normal",            "data",      "element",   0.65),
-    ("s1-t20", "TC_Login_OAuthCallback",      "feature_login",      "priority_high",   "consistently_failing",0.70, "normal",            "timeout",   "element",   0.70),
-]
 
-# FAILURE MESSAGE GENERATORS
-def gen_timeout_msg(rng):
-    elements = ["loading-spinner", "overlay-modal", "progress-bar", "auth-redirect", "session-token"]
-    timeouts  = [15, 20, 30, 45]
-    return f"Element '{rng.choice(elements)}' still visible after {rng.choice(timeouts)}s timeout"
-
-def gen_element_msg(rng):
-    locators = ["id=widget-container", "id=submit-btn", "css=.data-grid", "id=modal-confirm", "css=.nav-item"]
-    retries  = [3, 5, 7]
-    return f"Element with locator '{rng.choice(locators)}' not found after {rng.choice(retries)} retries"
-
-def gen_assertion_msg(rng):
-    pairs = [("200","500","Internal Server Error"), ("200","404","Not Found"),
-             ("201","400","Bad Request"),           ("200","503","Service Unavailable")]
-    exp, got, desc = rng.choice(pairs)
-    return f"Expected HTTP status '{exp}' but got '{got}' — {desc}"
-
-def gen_data_msg(rng):
-    rows   = [0, 1, 2]
-    mins   = [50, 100, 200]
-    ranges = ["Oct 2024", "last 30 days", "Q4 2024", "last 7 days"]
-    return f"CSV export contained {rng.choice(rows)} rows — expected at least {rng.choice(mins)} records for {rng.choice(ranges)}"
-
-FAIL_GEN = {
-    "timeout":   gen_timeout_msg,
-    "element":   gen_element_msg,
-    "assertion": gen_assertion_msg,
-    "data":      gen_data_msg,
+# iteration order here determines test IDs (t1..t20), so don't reorder
+TEST_CATEGORIES = {
+    # stable tests follow the run-level pass rate
+    "TC_Login_ValidCredentials":   "stable",
+    "TC_Login_InvalidPassword":    "stable",
+    "TC_Login_SessionTimeout":     "stable",
+    "TC_Login_AccountLockout":     "stable",
+    "TC_Dashboard_FilterByDate":   "stable",
+    "TC_Dashboard_Pagination":     "stable",
+    "TC_Dashboard_ExportChart":    "stable",
+    "TC_Dashboard_SearchBar":      "stable",
+    "TC_User_CreateAccount":       "stable",
+    "TC_User_EditProfile":         "stable",
+    "TC_User_DeleteAccount":       "stable",
+    "TC_User_PasswordReset":       "stable",
+    # flaky tests roll their own probability, ignoring the run pass rate
+    "TC_Login_SSORedirect":        ("flaky", 0.35),   # mild
+    "TC_Login_MFAVerification":    ("flaky", 0.30),   # mild
+    "TC_Dashboard_LoadWidget":     ("flaky", 0.50),   # moderate
+    "TC_Dashboard_RefreshData":    ("flaky", 0.55),   # moderate
+    "TC_User_BulkImport":          ("flaky", 0.65),   # heavy
+    # consistently failing - same mechanism as flaky but high fail rate
+    "TC_User_RoleAssignment":      ("consistent", 0.80),
+    "TC_User_BatchExport":         ("consistent", 0.75),
+    "TC_Login_OAuthCallback":      ("consistent", 0.70),
 }
 
-# keyword names used in inner <kw> for each failure type
-FAIL_KW = {
-    "timeout":   "Wait Until Element Is Visible",
-    "element":   "Click Element",
-    "assertion": "Should Be Equal As Integers",
-    "data":      "Should Not Be Empty",
+TEST_TAGS = {
+    "TC_Login_ValidCredentials":   ("feature_login",     "priority_high"),
+    "TC_Login_InvalidPassword":    ("feature_login",     "priority_high"),
+    "TC_Login_SessionTimeout":     ("feature_login",     "priority_high"),
+    "TC_Login_AccountLockout":     ("feature_login",     "priority_medium"),
+    "TC_Dashboard_FilterByDate":   ("feature_dashboard", "priority_medium"),
+    "TC_Dashboard_Pagination":     ("feature_dashboard", "priority_medium"),
+    "TC_Dashboard_ExportChart":    ("feature_dashboard", "priority_medium"),
+    "TC_Dashboard_SearchBar":      ("feature_dashboard", "priority_medium"),
+    "TC_User_CreateAccount":       ("feature_usermgmt",  "priority_high"),
+    "TC_User_EditProfile":         ("feature_usermgmt",  "priority_medium"),
+    "TC_User_DeleteAccount":       ("feature_usermgmt",  "priority_high"),
+    "TC_User_PasswordReset":       ("feature_usermgmt",  "priority_medium"),
+    "TC_Login_SSORedirect":        ("feature_login",     "priority_high"),
+    "TC_Login_MFAVerification":    ("feature_login",     "priority_high"),
+    "TC_Dashboard_LoadWidget":     ("feature_dashboard", "priority_medium"),
+    "TC_Dashboard_RefreshData":    ("feature_dashboard", "priority_medium"),
+    "TC_User_BulkImport":          ("feature_usermgmt",  "priority_medium"),
+    "TC_User_RoleAssignment":      ("feature_usermgmt",  "priority_high"),
+    "TC_User_BatchExport":         ("feature_usermgmt",  "priority_medium"),
+    "TC_Login_OAuthCallback":      ("feature_login",     "priority_high"),
 }
 
-# PASS RATE CURVE  (applies to stable + consistently_failing; flaky uses own prob)
-def run_pass_rate(n, anomaly_runs, anomaly_pass_rate):
-    """Return the suite-level pass-rate target for run n (1-indexed)."""
-    if n in anomaly_runs:
-        return anomaly_pass_rate
-    if   1  <= n <= 25: return random.uniform(0.60, 0.70)
-    elif 26 <= n <= 35: return random.uniform(0.55, 0.65)
-    elif 38 <= n <= 45: return random.uniform(0.50, 0.55)
-    elif 46 <= n <= 75: return random.uniform(0.55, 0.80)
-    else:               return random.uniform(0.82, 0.95)
+# (primary_type, secondary_type, prob_of_primary)
+# mixed types keep all 4 failure categories roughly balanced across runs
+FAILURE_CONFIG = {
+    "TC_Login_SSORedirect":        ("timeout",      "element",   0.70),
+    "TC_Login_MFAVerification":    ("timeout",      "assertion", 0.70),
+    "TC_Dashboard_LoadWidget":     ("element",      "timeout",   0.80),
+    "TC_Dashboard_RefreshData":    ("assertion",    "data",      0.60),
+    "TC_User_BulkImport":          ("data",         "assertion", 0.70),
+    "TC_User_RoleAssignment":      ("assertion",    "data",      0.65),
+    "TC_User_BatchExport":         ("data",         "element",   0.65),
+    "TC_Login_OAuthCallback":      ("timeout",      "element",   0.70),
+    # stable tests only fail on anomaly runs, always environment type
+    "TC_Login_ValidCredentials":   ("environment",  "environment", 1.00),
+    "TC_Login_InvalidPassword":    ("environment",  "environment", 1.00),
+    "TC_Login_SessionTimeout":     ("environment",  "environment", 1.00),
+    "TC_Login_AccountLockout":     ("environment",  "environment", 1.00),
+    "TC_Dashboard_FilterByDate":   ("environment",  "environment", 1.00),
+    "TC_Dashboard_Pagination":     ("environment",  "environment", 1.00),
+    "TC_Dashboard_ExportChart":    ("environment",  "environment", 1.00),
+    "TC_Dashboard_SearchBar":      ("environment",  "environment", 1.00),
+    "TC_User_CreateAccount":       ("environment",  "environment", 1.00),
+    "TC_User_EditProfile":         ("environment",  "environment", 1.00),
+    "TC_User_DeleteAccount":       ("environment",  "environment", 1.00),
+    "TC_User_PasswordReset":       ("environment",  "environment", 1.00),
+}
 
-# DURATION PATTERNS
-def base_duration(test_name, n, rng):
-    if test_name == "TC_Login_ValidCredentials":
-        # seasonal
-        if n % 2 == 0:
-            return rng.uniform(2.0, 3.5)
-        else:
-            return rng.uniform(4.5, 6.5)
+_FAILURE_KW_NAME = {
+    "timeout":     "Wait Until Element Is Visible",
+    "element":     "Click Element",
+    "assertion":   "Should Be Equal As Integers",
+    "data":        "Should Not Be Empty",
+    "environment": "Environment_Setup",
+}
 
-    if test_name == "TC_Dashboard_ExportChart":
-        # step change at run 50
-        if n <= 50:
-            return rng.uniform(3.0, 5.0)
-        else:
-            return rng.uniform(12.0, 15.0)
+# each lambda returns (message_string, keyword_name)
+FAILURE_MESSAGES = {
+    "timeout": lambda: (
+        "Element '{}' still visible after {}s timeout".format(
+            random.choice(["loading-spinner", "overlay-modal", "progress-bar",
+                           "auth-redirect", "session-token"]),
+            random.choice([15, 20, 30, 45]),
+        ),
+        _FAILURE_KW_NAME["timeout"],
+    ),
+    "element": lambda: (
+        "Element with locator '{}' not found after {} retries".format(
+            random.choice(["id=widget-container", "id=submit-btn", "css=.data-grid",
+                           "id=modal-confirm", "css=.nav-item"]),
+            random.choice([3, 5, 7]),
+        ),
+        _FAILURE_KW_NAME["element"],
+    ),
+    "assertion": lambda: (
+        (lambda p: "Expected HTTP status '{}' but got '{}' \u2014 {}".format(*p))(
+            random.choice([
+                ("200", "500", "Internal Server Error"),
+                ("200", "404", "Not Found"),
+                ("201", "400", "Bad Request"),
+                ("200", "503", "Service Unavailable"),
+            ])
+        ),
+        _FAILURE_KW_NAME["assertion"],
+    ),
+    "data": lambda: (
+        "CSV export contained {} rows \u2014 expected at least {} records for {}".format(
+            random.choice([0, 1, 2]),
+            random.choice([50, 100, 200]),
+            random.choice(["Oct 2024", "last 30 days", "Q4 2024", "last 7 days"]),
+        ),
+        _FAILURE_KW_NAME["data"],
+    ),
+    "environment": lambda: (
+        random.choice([
+            "Connection refused \u2014 test environment unreachable",
+            "Timeout waiting for application server to respond",
+            "Suite setup failed \u2014 environment health check failed",
+            "Unable to launch browser \u2014 infrastructure error",
+        ]),
+        _FAILURE_KW_NAME["environment"],
+    ),
+}
 
-    if test_name == "TC_User_BulkImport":
-        # progressive drift
-        if n <= 40:
-            return rng.uniform(10.0, 14.0)
-        elif n <= 65:
-            return rng.uniform(18.0, 24.0)
-        else:
-            return rng.uniform(28.0, 36.0)
 
-    return rng.uniform(1.2, 8.5)
+# --- core logic ---
 
-def test_duration(test_name, n, status, rng):
-    d = base_duration(test_name, n, rng)
-    if status == "FAIL":
-        d += rng.uniform(5.0, 15.0)
-    return round(d, 3)
+def get_pass_rate(n, config):
+    # anomaly runs get a hard override, not a curve value
+    if n in config["anomaly_runs"]:
+        return config["anomaly_pass_rate"]
+    if n <= 25:  return random.uniform(0.60, 0.70)  # early instability
+    if n <= 35:  return random.uniform(0.45, 0.65)  # declining
+    if n <= 45:  return random.uniform(0.50, 0.55)  # partial recovery (38-45, 36-37 already returned)
+    if n <= 75:  return random.uniform(0.55, 0.80)  # recovery
+    return random.uniform(0.82, 0.95)               # stable
 
-# TIMESTAMP HELPERS
-def fmt_ts(dt):
-    """Format datetime as Robot Framework timestamp string."""
-    return dt.strftime("%Y%m%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
 
-#-------------need to improve since not implementing the probablity of failure for flaky tests correctly, currently just adding a flat 30% to the fail_prob which is not ideal, should be using the run_pass_rate function to determine the overall pass rate for the run and then adjusting the fail_prob for flaky tests accordingly to meet that target pass rate while also respecting the relative failure rates of each test. This is a bit more complex but would produce more realistic data. Also Differentiate between flaky-mild, flaky-moderate, and flaky-heavy in how much they deviate from their base fail_prob, rather than using the same adjustment for all flaky categories.
-
-# DECIDE TEST OUTCOME
-def decide_outcome(category, fail_prob, is_anomaly, rng):
-    """Return True if test passes."""
-    if is_anomaly:
-        if category == "stable":
-            return rng.random() > 0.60
-        if category in ("flaky-mild", "flaky-moderate", "flaky-heavy"):
-            return rng.random() > min(fail_prob + 0.30, 0.95)
-        if category == "consistently_failing":
-            return rng.random() > min(fail_prob + 0.15, 0.99)
-        return True
-
+def test_passes(test_name, pass_rate):
+    category = TEST_CATEGORIES[test_name]
     if category == "stable":
-        return True
-    if category in ("flaky-mild", "flaky-moderate", "flaky-heavy"):
-        return rng.random() > fail_prob
-    if category == "consistently_failing":
-        return rng.random() > fail_prob
-    return True
+        return random.random() < pass_rate
+    # flaky/consistent: outcome is independent of run health
+    fail_prob = category[1]
+    return random.random() >= fail_prob
 
-#--------------
 
-# XML BUILDERS
-def build_test_xml(test, n, is_anomaly, current_dt, rng):
-    tid, name, feature_tag, priority_tag, category, fail_prob, _, primary, secondary, prim_prob = test
+def get_failure(test_name, n, config):
+    category = TEST_CATEGORIES[test_name]
+    if category == "stable":
+        if n in config["anomaly_runs"]:
+            return FAILURE_MESSAGES["environment"]()
+        # stable test failed outside anomaly run, use a random app-level type
+        # so environment messages stay exclusive to anomaly runs
+        app_type = random.choice(["timeout", "element", "assertion", "data"])
+        return FAILURE_MESSAGES[app_type]()
+    primary, secondary, prob = FAILURE_CONFIG[test_name]
+    failure_type = primary if random.random() < prob else secondary
+    return FAILURE_MESSAGES[failure_type]()
 
-    status = "PASS" if decide_outcome(category, fail_prob, is_anomaly, rng) else "FAIL"
 
-    dur = test_duration(name, n, status, rng)
-    start_dt = current_dt
-    end_dt   = start_dt + timedelta(seconds=dur)
+def _base_duration(test_name, n):
+    # progressive drift - gets slower over time, needed for ML4
+    if test_name == "TC_User_BulkImport":
+        if n <= 40:   return random.uniform(10, 14)
+        elif n <= 65: return random.uniform(18, 24)
+        else:         return random.uniform(32, 42)  # bumped from 28-36 for clearer ML4 signal
 
-    start_s = fmt_ts(start_dt)
-    end_s   = fmt_ts(end_dt)
-    info_ts = fmt_ts(start_dt + timedelta(milliseconds=200))
+    # step change at run 50
+    if test_name == "TC_Dashboard_ExportChart":
+        return random.uniform(3, 5) if n <= 50 else random.uniform(12, 15)
 
-    tags_xml = (
-        f'      <tag>alpha_regression</tag>\n'
-        f'      <tag>{feature_tag}</tag>\n'
-        f'      <tag>{priority_tag}</tag>\n'
-    )
+    # seasonal alternation - alternates even/odd
+    if test_name == "TC_Login_ValidCredentials":
+        return random.uniform(2.0, 3.5) if n % 2 == 0 else random.uniform(4.5, 6.5)
 
-    if status == "PASS":
-        kw_xml = (
-            f'      <kw name="Run Test Steps" library="SeleniumLibrary">\n'
-            f'        <msg timestamp="{info_ts}" level="INFO">Executing {name}</msg>\n'
-            f'        <status status="PASS" starttime="{start_s}" endtime="{end_s}"/>\n'
-            f'      </kw>\n'
-        )
-        outer_status = f'      <status status="PASS" starttime="{start_s}" endtime="{end_s}"/>\n'
+    return random.uniform(1.2, 8.5)
+
+
+def get_duration(test_name, n, status):
+    base = _base_duration(test_name, n)
+    if status == "FAIL":
+        return base + random.uniform(5, 15)  # timeout/retry overhead
+    return base
+
+
+# --- XML builder ---
+
+RF_FMT = "%Y%m%d %H:%M:%S.%f"
+
+
+def _ts(dt):
+    return dt.strftime(RF_FMT)[:-3]  # trim to milliseconds
+
+
+def _indent(elem, level=0):
+    pad = "\n" + "  " * level
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = pad + "  "
+        for child in elem:
+            _indent(child, level + 1)
+            if not child.tail or not child.tail.strip():
+                child.tail = pad + "  "
+        if not child.tail or not child.tail.strip():
+            child.tail = pad
     else:
-        # duration of faliure other and inner kw is determined randomly within a range to create more realistic variability in the logs, rather than having all failures occur at the same point in time.
-        if prim_prob is None:
-            ftype = primary or "timeout"
-        else:
-            ftype = primary if rng.random() < prim_prob else secondary
-        fail_msg = FAIL_GEN[ftype](rng)
-        fail_ts  = fmt_ts(end_dt - timedelta(milliseconds=rng.randint(5, 50)))
-        inner_kw = FAIL_KW[ftype]
-        inner_start = fmt_ts(end_dt - timedelta(milliseconds=rng.randint(50, 100)))
-
-        kw_xml = (
-            f'      <kw name="Run Test Steps" library="SeleniumLibrary">\n'
-            f'        <msg timestamp="{info_ts}" level="INFO">Executing {name}</msg>\n'
-            f'        <msg timestamp="{fail_ts}" level="FAIL">{fail_msg}</msg>\n'
-            f'        <status status="FAIL" starttime="{start_s}" endtime="{end_s}"/>\n'
-            f'      </kw>\n'
-            f'      <kw name="{inner_kw}" library="BuiltIn">\n'
-            f'        <msg timestamp="{fail_ts}" level="FAIL">{fail_msg}</msg>\n'
-            f'        <status status="FAIL" starttime="{inner_start}" endtime="{fail_ts}"/>\n'
-            f'      </kw>\n'
-        )
-        outer_status = f'      <status status="FAIL" starttime="{start_s}" endtime="{end_s}">{fail_msg}</status>\n'
-
-    xml = (
-        f'    <test id="{tid}" name="{name}">\n'
-        f'{tags_xml}'
-        f'{kw_xml}'
-        f'{outer_status}'
-        f'    </test>\n'
-    )
-    return xml, status, end_dt
+        # don't overwrite text content (failure messages live here)
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = pad
 
 
-def build_run(n, config, rng):
+def build_xml(run_id, run_time, tests_data, config):
+    root = ET.Element("robot")
+    root.set("generator", "Robot 6.1.1 (Python 3.10.12)")
+    root.set("generated", _ts(run_time))
+    root.set("rpa", "FALSE")
+    root.set("schemaversion", "4")
 
-    #-----------------------------
-    run_dt = datetime.fromisoformat(config["start_date"]) + timedelta(hours=config["interval_hours"] * (n - 1))
-    is_anomaly = n in config["anomaly_runs"]
+    suite = ET.SubElement(root, "suite")
+    suite.set("id", "s1")
+    suite.set("name", config["suite_name"])
+    suite.set("source", "/opt/ci/tests/alpha/{}.robot".format(config["suite_name"]))
 
-    generated_s = fmt_ts(run_dt)
-    suite_start  = run_dt
-    #------------------------------
+    kw_setup = ET.SubElement(suite, "kw")
+    kw_setup.set("name", "Suite Setup")
+    kw_setup.set("type", "setup")
 
-    # Suite setup
-    setup_end = suite_start + timedelta(milliseconds=110)
-    suite_xml = (
-        f'  <suite id="s1" name="{config["suite_name"]}" '
-        f'source="/opt/ci/tests/alpha/{config["suite_name"]}.robot">\n'
-        f'    <kw name="Suite Setup" type="setup">\n'
-        f'      <msg timestamp="{generated_s}" level="INFO">'
-        f'Suite {config["suite_name"]} initialized — team {config["team_name"]}</msg>\n'
-        f'      <status status="PASS" starttime="{generated_s}" endtime="{fmt_ts(setup_end)}"/>\n'
-        f'    </kw>\n'
+    setup_msg = ET.SubElement(kw_setup, "msg")
+    setup_msg.set("timestamp", _ts(run_time))
+    setup_msg.set("level", "INFO")
+    setup_msg.text = "Suite {} initialized \u2014 team {}".format(
+        config["suite_name"], config["team_name"]
     )
 
-    cursor = setup_end + timedelta(milliseconds=200)
+    setup_end = run_time + timedelta(milliseconds=110)
+    setup_status = ET.SubElement(kw_setup, "status")
+    setup_status.set("status", "PASS")
+    setup_status.set("starttime", _ts(run_time))
+    setup_status.set("endtime", _ts(setup_end))
+
     passed = 0
     failed = 0
-    tests_xml = ""
+    suite_end_time = run_time
 
-    for test in TESTS:
-        t_xml, status, cursor = build_test_xml(test, n, is_anomaly, cursor, rng)
-        tests_xml += t_xml
-        cursor += timedelta(milliseconds=rng.randint(100, 300))
+    for idx, td in enumerate(tests_data, start=1):
+        test_name = td["name"]
+        status    = td["status"]
+        t_start   = td["starttime"]
+        t_end     = td["endtime"]
+        feat_tag, prio_tag = TEST_TAGS[test_name]
+
+        test_el = ET.SubElement(suite, "test")
+        test_el.set("id", "s1-t{}".format(idx))
+        test_el.set("name", test_name)
+
+        ET.SubElement(test_el, "tag").text = "alpha_regression"
+        ET.SubElement(test_el, "tag").text = feat_tag
+        ET.SubElement(test_el, "tag").text = prio_tag
+
+        kw = ET.SubElement(test_el, "kw")
+        kw.set("name", "Run Test Steps")
+        kw.set("library", "SeleniumLibrary")
+
+        info_msg = ET.SubElement(kw, "msg")
+        info_msg.set("timestamp", _ts(t_start))
+        info_msg.set("level", "INFO")
+        info_msg.text = "Executing {}".format(test_name)
+
+        if status == "FAIL":
+            fail_msg_text = td["fail_msg"]
+            fail_msg_el = ET.SubElement(kw, "msg")
+            fail_msg_el.set("timestamp", _ts(t_end))
+            fail_msg_el.set("level", "FAIL")
+            fail_msg_el.text = fail_msg_text
+
+        kw_status = ET.SubElement(kw, "status")
+        kw_status.set("status", status)
+        kw_status.set("starttime", _ts(t_start))
+        kw_status.set("endtime", _ts(t_end))
+
+        if status == "FAIL":
+            fail_kw = ET.SubElement(test_el, "kw")
+            fail_kw.set("name", td["fail_kw"])
+            fail_kw.set("library", "BuiltIn")
+
+            inner_msg = ET.SubElement(fail_kw, "msg")
+            inner_msg.set("timestamp", _ts(t_end))
+            inner_msg.set("level", "FAIL")
+            inner_msg.text = fail_msg_text
+
+            inner_kw_status = ET.SubElement(fail_kw, "status")
+            inner_kw_status.set("status", "FAIL")
+            inner_kw_start = t_end - timedelta(milliseconds=50)
+            inner_kw_status.set("starttime", _ts(inner_kw_start))
+            inner_kw_status.set("endtime", _ts(t_end))
+
+        test_status = ET.SubElement(test_el, "status")
+        test_status.set("status", status)
+        test_status.set("starttime", _ts(t_start))
+        test_status.set("endtime", _ts(t_end))
+        if status == "FAIL":
+            test_status.text = fail_msg_text
+
         if status == "PASS":
             passed += 1
         else:
             failed += 1
 
-    suite_status = "FAIL" if failed > 0 else "PASS"
-    suite_end_s  = fmt_ts(cursor)
+        suite_end_time = t_end
 
-    suite_xml += tests_xml
-    suite_xml += (
-        f'    <status status="{suite_status}" starttime="{generated_s}" '
-        f'endtime="{suite_end_s}" passed="{passed}" failed="{failed}"/>\n'
-        f'  </suite>\n'
-    )
+    suite_end    = suite_end_time + timedelta(milliseconds=250)
+    suite_result = "FAIL" if failed > 0 else "PASS"
 
-    stats_xml = (
-        f'  <statistics>\n'
-        f'    <total>\n'
-        f'      <stat pass="{passed}" fail="{failed}">All Tests</stat>\n'
-        f'    </total>\n'
-        f'    <tag>\n'
-        f'      <stat pass="{passed}" fail="{failed}">alpha_regression</stat>\n'
-        f'    </tag>\n'
-        f'  </statistics>\n'
-        f'  <errors/>\n'
-    )
+    suite_status = ET.SubElement(suite, "status")
+    suite_status.set("status", suite_result)
+    suite_status.set("starttime", _ts(run_time))
+    suite_status.set("endtime", _ts(suite_end))
+    suite_status.set("passed", str(passed))
+    suite_status.set("failed", str(failed))
 
-    full_xml = (
-        f'<robot generator="Robot 6.1.1 (Python 3.10.12)" '
-        f'generated="{generated_s}" rpa="FALSE" schemaversion="4">\n'
-        f'{suite_xml}'
-        f'{stats_xml}'
-        f'</robot>\n'
-    )
+    # copy counts from suite status, don't recompute
+    stats_el  = ET.SubElement(root, "statistics")
+    total_el  = ET.SubElement(stats_el, "total")
+    stat_all  = ET.SubElement(total_el, "stat")
+    stat_all.set("pass", str(passed))
+    stat_all.set("fail", str(failed))
+    stat_all.text = "All Tests"
 
+    tag_el   = ET.SubElement(stats_el, "tag")
+    stat_tag = ET.SubElement(tag_el, "stat")
+    stat_tag.set("pass", str(passed))
+    stat_tag.set("fail", str(failed))
+    stat_tag.text = "alpha_regression"
+
+    ET.SubElement(root, "errors")
+
+    return root, passed, failed
+
+
+# --- entry point ---
+
+def compute_tests(n, pass_rate, run_time, config):
+    tests_data = []
+    cursor = run_time
+
+    for test_name in TEST_CATEGORIES:
+        t_start  = cursor + timedelta(seconds=0.2)
+        passes   = test_passes(test_name, pass_rate)
+        status   = "PASS" if passes else "FAIL"
+        duration = get_duration(test_name, n, status)
+        t_end    = t_start + timedelta(seconds=duration)
+        cursor   = t_end
+
+        td = {
+            "name":      test_name,
+            "status":    status,
+            "starttime": t_start,
+            "endtime":   t_end,
+        }
+        if status == "FAIL":
+            fail_msg, fail_kw = get_failure(test_name, n, config)
+            td["fail_msg"] = fail_msg
+            td["fail_kw"]  = fail_kw
+
+        tests_data.append(td)
+
+    return tests_data
+
+
+def write_xml(folder, run_id, run_time, tests_data, config):
+    root, passed, failed = build_xml(run_id, run_time, tests_data, config)
+    _indent(root)
+    tree = ET.ElementTree(root)
+    xml_path = os.path.join(folder, "output.xml")
+    tree.write(xml_path, encoding="unicode", xml_declaration=False)
+    return passed, failed
+
+
+def write_metadata(folder, n, run_time, passed, failed, config):
     total = passed + failed
     meta = {
         "team":          config["team_name"],
         "suite":         config["suite_name"],
         "build_no":      n,
-        "timestamp":     run_dt.isoformat(),
+        "timestamp":     run_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "total":         total,
         "passed":        passed,
         "failed":        failed,
         "pass_rate_pct": round(passed / total * 100, 1),
         "environment":   "staging",
-        "executor":      f"jenkins-agent-{rng.randint(1,9):02d}",
+        "executor":      "jenkins-agent-03",
     }
+    meta_path = os.path.join(folder, "ci_metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
 
-    return full_xml, meta
 
+def generate_all_runs(config):
+    if config.get("seed") is not None:
+        random.seed(config["seed"])
 
-# MAIN─
-def generate(config):
-    rng = random.Random(config["seed"])
-    out = config["output_dir"]
-    num = config["num_runs"]
+    base_time = datetime.strptime(config["start_date"], "%Y-%m-%d").replace(hour=2)
+    num_runs  = config["num_runs"]
 
-    os.makedirs(out, exist_ok=True)
+    print("Generating {} runs into '{}' ...".format(num_runs, config["output_dir"]))
 
-    for n in range(1, num + 1):
-        folder = os.path.join(out, f"{config['team_name']}_build_{n:03d}")
+    for n in range(1, num_runs + 1):
+        run_id   = "{}_build_{:03d}".format(config["team_name"], n)
+        folder   = os.path.join(config["output_dir"], run_id)
+        run_time = base_time + timedelta(hours=config["interval_hours"] * (n - 1))
+
+        pass_rate = get_pass_rate(n, config)
         os.makedirs(folder, exist_ok=True)
 
-        xml, meta = build_run(n, config, rng)
+        tests_data     = compute_tests(n, pass_rate, run_time, config)
+        passed, failed = write_xml(folder, run_id, run_time, tests_data, config)
+        write_metadata(folder, n, run_time, passed, failed, config)
 
-        with open(os.path.join(folder, "output.xml"), "w", encoding="utf-8") as f:
-            f.write(xml)
+        if n % 10 == 0 or n in config["anomaly_runs"]:
+            tag = " *** ANOMALY ***" if n in config["anomaly_runs"] else ""
+            print("  Run {:3d}/{} | target PR {:.0%} | actual {}/{}{}".format(
+                n, num_runs, pass_rate, passed, passed + failed, tag))
 
-        with open(os.path.join(folder, "ci_metadata.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-
-        if n % 10 == 0:
-            print(f"  Generated run {n:3d}/{num}  pass={meta['passed']:2d}  fail={meta['failed']:2d}  "
-                  f"pass_rate={meta['pass_rate_pct']}%")
-
-    print(f"\nDone — {num} runs written to {out}/")
+    print("Done. {} run folders written to '{}'.".format(num_runs, config["output_dir"]))
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Phase 1 Synthetic Log Generator")
-    p.add_argument("--output-dir",  default=DEFAULT_CONFIG["output_dir"])
-    p.add_argument("--num-runs",    type=int,   default=DEFAULT_CONFIG["num_runs"])
-    p.add_argument("--start-date",  default=DEFAULT_CONFIG["start_date"])
-    p.add_argument("--interval",    type=int,   default=DEFAULT_CONFIG["interval_hours"],
-                   dest="interval_hours")
-    p.add_argument("--seed",        type=int,   default=DEFAULT_CONFIG["seed"])
-    p.add_argument("--team",        default=DEFAULT_CONFIG["team_name"])
+    p = argparse.ArgumentParser(description="Phase 1 Synthetic CI Log Generator")
+    p.add_argument("--output-dir", default=CONFIG["output_dir"])
+    p.add_argument("--num-runs",   type=int, default=CONFIG["num_runs"])
+    p.add_argument("--start-date", default=CONFIG["start_date"])
+    p.add_argument("--interval",   type=int, default=CONFIG["interval_hours"], dest="interval_hours")
+    p.add_argument("--seed",       type=int, default=CONFIG["seed"])
+    p.add_argument("--team",       default=CONFIG["team_name"])
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg = dict(DEFAULT_CONFIG)
+    cfg = dict(CONFIG)
     cfg.update({
         "output_dir":     args.output_dir,
         "num_runs":       args.num_runs,
@@ -355,5 +484,4 @@ if __name__ == "__main__":
         "seed":           args.seed,
         "team_name":      args.team,
     })
-    print(f"Generating {cfg['num_runs']} runs → {cfg['output_dir']}/")
-    generate(cfg)
+    generate_all_runs(cfg)
