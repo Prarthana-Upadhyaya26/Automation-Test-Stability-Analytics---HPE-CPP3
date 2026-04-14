@@ -8,10 +8,7 @@ data into analytics.db (Phase 2 schema).
 What it populates
 -----------------
   runs          — one row per CI run (from ci_metadata.json)
-  tests         — one row per test per run (from output.xml)
-  test_results  — one-to-one with tests; stores category / feature / priority
-  failures      — one row per failed test; stores category + message text
-  tags          — one row per tag per test per run
+  test_results  — one row per test per run (from output.xml)
   ingestion_log — tracks which runs have been processed (idempotency)
 """
 
@@ -99,99 +96,9 @@ def calculate_duration(start_str: str, end_str: str) -> float:
         return 0.0
 
 
-# FAILURE MESSAGE CLASSIFICATION
-
-_CATEGORY_PATTERNS = [
-    ("timeout",     "still visible after",  "timeout"),
-    ("element",     "not found after",      "retries"),
-    ("assertion",   "Expected HTTP status", None),
-    ("data",        "CSV export contained", "rows"),
-    ("environment", "environment",          None),
-    ("environment", "unreachable",          None),
-]
-
-
-def classify_failure_message(message: str) -> str:
-    """
-    Derive a failure category ('timeout', 'element', 'assertion', 'data',
-    'environment') from a failure message string.
-
-    Falls back to 'data' when no pattern matches so the row is still stored.
-    """
-    lower = message.lower()
-    for category, primary, secondary in _CATEGORY_PATTERNS:
-        if primary.lower() in lower:
-            if secondary is None or secondary.lower() in lower:
-                return category
-    return "data"
-
-
-def extract_failure_info(test_el) -> dict | None:
-    """
-    Extract failure category, message text, and failing keyword from a
-    ``<test>`` XML element.
-
-    Returns
-    -------
-    dict | None
-        ``{'category': str, 'message': str, 'keyword_name': str | None}``
-        or ``None`` when no failure message is present.
-    """
-
-    status_el = test_el.find("status")
-    if status_el is None or status_el.get("status") != "FAIL":
-        return None
-
-    message = (status_el.text or "").strip()
-    if not message:
-        msg_el = test_el.find(".//msg[@level='FAIL']")
-        message = (msg_el.text or "").strip() if msg_el is not None else ""
-
-    if not message:
-        return None
-
-    # Walk innermost failing keyword
-    keyword_name = None
-    for kw_el in reversed(test_el.findall(".//kw")):
-        kw_status = kw_el.find("status")
-        if kw_status is not None and kw_status.get("status") == "FAIL":
-            keyword_name = kw_el.get("name")
-            break
-
-    return {
-        "category":     classify_failure_message(message),
-        "message":      message,
-        "keyword_name": keyword_name,
-    }
-
-
-# CONFIG LOOKUP
-
-def get_test_category_from_config(test_name: str) -> tuple[str, float | None]:
-    """
-    Look up a test's (category, fail_probability) from config.py TESTS.
-
-    Falls back to ('unknown', None) for tests not found in the config so the
-    pipeline is tolerant of extra tests in the XML.
-
-    Returns
-    -------
-    tuple[str, float | None]
-        e.g. ``('flaky-moderate', 0.50)``
-    """
-    try:
-        from config import TESTS
-        for entry in TESTS:
-            if entry[1] == test_name:   # index 1 = name
-                return entry[4], entry[5]  # category, fail_prob
-    except ImportError:
-        pass
-    return "unknown", None
-
-
 # RUN FOLDER PARSER
 
-def parse_run(run_folder: str, run_id: int) -> dict:
+def parse_run(run_folder: str, folder_name: str) -> dict:
     """
     Parse one run folder and return all data ready for database insertion.
 
@@ -199,14 +106,13 @@ def parse_run(run_folder: str, run_id: int) -> dict:
     ----------
     run_folder : str
         Path to a folder that contains ``output.xml`` and ``ci_metadata.json``.
-    run_id : int
-        Integer run identifier (extracted from the folder name).
+    folder_name : str
+        The folder name itself, used as run_id (e.g. "TeamAlpha_build_001").
 
     Returns
     -------
     dict
-        ``{'run': {...}, 'tests': [...], 'failures': [...], 'tags': [...]}``
-
+        ``{'run': {...}, 'tests': [...]}``
     """
     # ── metadata JSON ────────────────────────────────────────────────────────
     meta_path = os.path.join(run_folder, "ci_metadata.json")
@@ -222,13 +128,17 @@ def parse_run(run_folder: str, run_id: int) -> dict:
         )
 
     run_data = {
-        "run_id":       run_id,
-        "build_number": meta["build_no"],
+        "run_id":       folder_name,
+        "team":         meta.get("team", "TeamAlpha"),
+        "suite_name":   meta.get("suite", meta.get("suite_name", "Suite_Regression")),
+        "job_name":     meta.get("job_name"),
+        "build_no":     meta.get("build_no"),
         "timestamp":    meta["timestamp"],
-        "total_tests":  meta["total"],
+        "duration_s":   meta.get("duration_s"),
+        "total":        meta["total"],
         "passed":       meta["passed"],
         "failed":       meta["failed"],
-        "pass_rate":    pass_rate,
+        "pass_rate_pct": pass_rate,
         "environment":  meta.get("environment", "staging"),
         "executor":     meta.get("executor", "jenkins-agent-01"),
     }
@@ -237,9 +147,11 @@ def parse_run(run_folder: str, run_id: int) -> dict:
     xml_path = os.path.join(run_folder, "output.xml")
     root = ET.parse(xml_path).getroot()
 
-    tests: list[dict]    = []
-    failures: list[dict] = []
-    tags: list[dict]     = []
+    # Derive suite name from the XML root suite element if available
+    suite_el = root.find(".//suite")
+    xml_suite_name = suite_el.get("name", run_data["suite_name"]) if suite_el is not None else run_data["suite_name"]
+
+    tests: list[dict] = []
 
     for test_el in root.findall(".//test"):
         test_name = test_el.get("name", "")
@@ -250,55 +162,78 @@ def parse_run(run_folder: str, run_id: int) -> dict:
         status     = status_el.get("status", "FAIL")
         start_time = status_el.get("starttime", "")
         end_time   = status_el.get("endtime", "")
-        duration   = calculate_duration(start_time, end_time)
+        duration_s = calculate_duration(start_time, end_time)
 
-        category, fail_prob = get_test_category_from_config(test_name)
-
-        # Extract feature / priority from tags
-        feature  = "unknown"
-        priority = "unknown"
+        # Collect all tags as a JSON array string
         tag_names: list[str] = []
-
         for tag_el in test_el.findall("tag"):
             tag_text = (tag_el.text or "").strip()
-            if not tag_text:
-                continue
-            tag_names.append(tag_text)
-            if tag_text.startswith("feature_"):
-                feature = tag_text
-            elif tag_text.startswith("priority_"):
-                priority = tag_text
+            if tag_text:
+                tag_names.append(tag_text)
+        tags_json = json.dumps(tag_names)
+
+        # Extract failure info (NULL on PASS)
+        failure_msg = None
+        failure_kw  = None
+        if status == "FAIL":
+            failure_msg, failure_kw = _extract_failure_info(test_el)
+
+        # Construct the composite primary key exactly as the spec requires:
+        # run_id + "_" + test_name
+        result_id = f"{folder_name}_{test_name}"
 
         tests.append({
-            "run_id":     run_id,
-            "test_name":  test_name,
-            "status":     status,
-            "duration":   duration,
-            "start_time": start_time,
-            "end_time":   end_time,
-            # Extra fields needed for test_results table
-            "feature":          feature,
-            "priority":         priority,
-            "category":         category,
-            "fail_probability": fail_prob,
+            "result_id":   result_id,
+            "run_id":      folder_name,
+            "suite_name":  xml_suite_name,
+            "test_name":   test_name,
+            "status":      status,
+            "duration_s":  duration_s,
+            "failure_msg": failure_msg,
+            "failure_kw":  failure_kw,
+            "tags":        tags_json,
         })
 
-        for tag_name in tag_names:
-            tags.append({"test_name": test_name, "tag_name": tag_name})
+    return {"run": run_data, "tests": tests}
 
-        if status == "FAIL":
-            failure_info = extract_failure_info(test_el)
-            if failure_info:
-                failures.append({"test_name": test_name, **failure_info})
 
-    return {"run": run_data, "tests": tests, "failures": failures, "tags": tags}
+def _extract_failure_info(test_el) -> tuple[str | None, str | None]:
+    """
+    Extract the failure message and failing keyword name from a <test> element.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        (failure_msg, failure_kw) — both None if no failure message is found.
+    """
+    status_el = test_el.find("status")
+    if status_el is None or status_el.get("status") != "FAIL":
+        return None, None
+
+    message = (status_el.text or "").strip()
+    if not message:
+        msg_el = test_el.find(".//msg[@level='FAIL']")
+        message = (msg_el.text or "").strip() if msg_el is not None else ""
+
+    if not message:
+        return None, None
+
+    # Walk innermost failing keyword
+    keyword_name = None
+    for kw_el in reversed(test_el.findall(".//kw")):
+        kw_status = kw_el.find("status")
+        if kw_status is not None and kw_status.get("status") == "FAIL":
+            keyword_name = kw_el.get("name")
+            break
+
+    return message or None, keyword_name
 
 
 # DATABASE LOADING (single run, inside a transaction)
 
 def load_run_data(conn: sqlite3.Connection, run_data: dict) -> dict:
     """
-    Insert one run's data into all five tables inside a single transaction.
+    Insert one run's data into runs and test_results inside a single transaction.
 
     The transaction is NOT committed here; the caller controls commit
     frequency (batch commits every N runs for performance).
@@ -313,8 +248,7 @@ def load_run_data(conn: sqlite3.Connection, run_data: dict) -> dict:
     Returns
     -------
     dict
-        ``{'tests_inserted': int, 'failures_inserted': int, 'tags_inserted': int}``
-
+        ``{'tests_inserted': int}``
     """
     cursor = conn.cursor()
 
@@ -323,94 +257,51 @@ def load_run_data(conn: sqlite3.Connection, run_data: dict) -> dict:
         cursor.execute(
             """
             INSERT INTO runs
-                (run_id, build_number, timestamp, total_tests,
-                 passed, failed, pass_rate, environment, executor)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (run_id, team, suite_name, job_name, build_no, timestamp,
+                 duration_s, total, passed, failed, pass_rate_pct,
+                 environment, executor)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_data["run"]["run_id"],
-                run_data["run"]["build_number"],
+                run_data["run"]["team"],
+                run_data["run"]["suite_name"],
+                run_data["run"]["job_name"],
+                run_data["run"]["build_no"],
                 run_data["run"]["timestamp"],
-                run_data["run"]["total_tests"],
+                run_data["run"]["duration_s"],
+                run_data["run"]["total"],
                 run_data["run"]["passed"],
                 run_data["run"]["failed"],
-                run_data["run"]["pass_rate"],
+                run_data["run"]["pass_rate_pct"],
                 run_data["run"]["environment"],
                 run_data["run"]["executor"],
             ),
         )
 
-        # ── tests + test_results ─────────────────────────────────────────────
-        # test_name → test_id mapping so failures/tags can reference it
-        test_id_map: dict[str, int] = {}
-
+        # ── test_results ─────────────────────────────────────────────────────
         for test in run_data["tests"]:
             cursor.execute(
                 """
-                INSERT INTO tests
-                    (run_id, test_name, status, duration, start_time, end_time)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO test_results
+                    (result_id, run_id, suite_name, test_name, status,
+                     duration_s, failure_msg, failure_kw, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    test["result_id"],
                     test["run_id"],
+                    test["suite_name"],
                     test["test_name"],
                     test["status"],
-                    test["duration"],
-                    test["start_time"],
-                    test["end_time"],
-                ),
-            )
-            test_id = cursor.lastrowid
-            if test_id is not None:
-                test_id_map[test["test_name"]] = test_id
-
-            cursor.execute(
-                """
-                INSERT INTO test_results
-                    (test_id, feature, priority, category, fail_probability)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    test_id,
-                    test["feature"],
-                    test["priority"],
-                    test["category"],
-                    test["fail_probability"],
+                    test["duration_s"],
+                    test["failure_msg"],
+                    test["failure_kw"],
+                    test["tags"],
                 ),
             )
 
-        # ── failures ─────────────────────────────────────────────────────────
-        failures_inserted = 0
-        for failure in run_data["failures"]:
-            test_id = test_id_map.get(failure["test_name"])
-            if test_id is None:
-                continue  # test not in this run (shouldn't happen)
-            cursor.execute(
-                """
-                INSERT INTO failures (test_id, category, message, keyword_name)
-                VALUES (?, ?, ?, ?)
-                """,
-                (test_id, failure["category"], failure["message"], failure["keyword_name"]),
-            )
-            failures_inserted += 1
-
-        # ── tags ─────────────────────────────────────────────────────────────
-        tags_inserted = 0
-        for tag in run_data["tags"]:
-            test_id = test_id_map.get(tag["test_name"])
-            if test_id is None:
-                continue
-            cursor.execute(
-                "INSERT INTO tags (test_id, tag_name) VALUES (?, ?)",
-                (test_id, tag["tag_name"]),
-            )
-            tags_inserted += 1
-
-        return {
-            "tests_inserted":    len(run_data["tests"]),
-            "failures_inserted": failures_inserted,
-            "tags_inserted":     tags_inserted,
-        }
+        return {"tests_inserted": len(run_data["tests"])}
 
     except sqlite3.Error as exc:
         conn.rollback()
@@ -421,7 +312,7 @@ def load_run_data(conn: sqlite3.Connection, run_data: dict) -> dict:
 
 # INGESTION LOG HELPERS
 
-def is_already_ingested(conn: sqlite3.Connection, run_id: int) -> bool:
+def is_already_ingested(conn: sqlite3.Connection, run_id: str) -> bool:
     """Return True if run_id is in ingestion_log with status='success'."""
     row = conn.execute(
         "SELECT 1 FROM ingestion_log WHERE run_id = ? AND status = 'success'",
@@ -430,7 +321,7 @@ def is_already_ingested(conn: sqlite3.Connection, run_id: int) -> bool:
     return row is not None
 
 
-def log_ingestion_success(conn: sqlite3.Connection, run_id: int) -> None:
+def log_ingestion_success(conn: sqlite3.Connection, run_id: str) -> None:
     """Record a successful ingestion in ingestion_log."""
     conn.execute(
         """
@@ -441,7 +332,7 @@ def log_ingestion_success(conn: sqlite3.Connection, run_id: int) -> None:
     )
 
 
-def log_ingestion_error(conn: sqlite3.Connection, run_id: int, error_msg: str) -> None:
+def log_ingestion_error(conn: sqlite3.Connection, run_id: str, error_msg: str) -> None:
     """Record a failed ingestion in ingestion_log."""
     conn.execute(
         """
@@ -464,7 +355,7 @@ def run_pipeline(config: dict) -> dict:
     3. For each TeamAlpha_build_XXX folder (sorted):
        a. Skip if already in ingestion_log with status='success'.
        b. Parse output.xml + ci_metadata.json.
-       c. Insert into runs / tests / test_results / failures / tags.
+       c. Insert into runs / test_results.
        d. Write success row to ingestion_log.
        e. Commit every batch_size runs.
     4. Print summary statistics.
@@ -506,26 +397,18 @@ def run_pipeline(config: dict) -> dict:
 
     # ── Process folders ───────────────────────────────────────────────────────
     stats = {
-        "runs_processed":    0,
-        "tests_inserted":    0,
-        "failures_inserted": 0,
-        "tags_inserted":     0,
-        "runs_skipped":      0,
-        "errors":            0,
+        "runs_processed": 0,
+        "tests_inserted": 0,
+        "runs_skipped":   0,
+        "errors":         0,
     }
 
     print(f"Processing {len(folders)} folders...")
     print()
 
     for i, folder in enumerate(folders, 1):
-        # Extract integer run_id from folder name (TeamAlpha_build_001 → 1)
-        try:
-            run_id = int(folder.rsplit("_", 1)[-1])
-        except ValueError:
-            print(f"  ⚠ Cannot parse run_id from folder name '{folder}' — skipping")
-            stats["errors"] += 1
-            continue
-
+        # The folder name IS the run_id (e.g. "TeamAlpha_build_001")
+        run_id      = folder
         folder_path = os.path.join(runs_dir, folder)
 
         # ── Idempotency check ─────────────────────────────────────────────────
@@ -535,7 +418,7 @@ def run_pipeline(config: dict) -> dict:
 
         # ── Parse ─────────────────────────────────────────────────────────────
         try:
-            run_data = parse_run(folder_path, run_id)
+            run_data = parse_run(folder_path, folder)
         except Exception as exc:
             msg = str(exc)
             print(f"  ✗ Parse error  — {folder}: {msg[:120]}")
@@ -556,19 +439,15 @@ def run_pipeline(config: dict) -> dict:
         # ── Success ───────────────────────────────────────────────────────────
         log_ingestion_success(conn, run_id)
 
-        stats["runs_processed"]    += 1
-        stats["tests_inserted"]    += result["tests_inserted"]
-        stats["failures_inserted"] += result["failures_inserted"]
-        stats["tags_inserted"]     += result["tags_inserted"]
+        stats["runs_processed"] += 1
+        stats["tests_inserted"] += result["tests_inserted"]
 
         # Batch commit
         if stats["runs_processed"] % batch_size == 0 or i == len(folders):
             conn.commit()
             print(
                 f"  ✓  {stats['runs_processed']:3d}/{len(folders)} runs  "
-                f"| {stats['tests_inserted']:5d} tests  "
-                f"| {stats['failures_inserted']:4d} failures  "
-                f"| {stats['tags_inserted']:5d} tags"
+                f"| {stats['tests_inserted']:5d} tests"
             )
 
     conn.commit()
@@ -582,8 +461,6 @@ def run_pipeline(config: dict) -> dict:
     print(f"  Runs processed  : {stats['runs_processed']:4d}")
     print(f"  Runs skipped    : {stats['runs_skipped']:4d}  (already ingested)")
     print(f"  Tests inserted  : {stats['tests_inserted']:4d}")
-    print(f"  Failures stored : {stats['failures_inserted']:4d}")
-    print(f"  Tags stored     : {stats['tags_inserted']:4d}")
     if stats["errors"] > 0:
         print(f"  ✗ Errors        : {stats['errors']:4d}  (check output above)")
     print()
@@ -591,11 +468,8 @@ def run_pipeline(config: dict) -> dict:
     # ── Row-count verification ────────────────────────────────────────────────
     print("Verifying database row counts...")
     checks = [
-        ("runs",         stats["runs_processed"]    + stats["runs_skipped"], True),
-        ("tests",        stats["tests_inserted"],                            False),
-        ("test_results", stats["tests_inserted"],                            False),
-        ("failures",     stats["failures_inserted"],                         False),
-        ("tags",         stats["tags_inserted"],                             False),
+        ("runs",         stats["runs_processed"] + stats["runs_skipped"], True),
+        ("test_results", stats["tests_inserted"],                         False),
     ]
 
     all_good = True
@@ -614,7 +488,7 @@ def run_pipeline(config: dict) -> dict:
     if all_good:
         print("✓ Database verification passed")
     else:
-        print("✗ Some row counts are unexpected — run validate_database.py for details")
+        print("✗ Some row counts are unexpected — check the output above for errors")
 
     print()
     conn.close()

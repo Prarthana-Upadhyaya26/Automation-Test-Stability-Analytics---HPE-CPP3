@@ -12,9 +12,8 @@ Answers five operational questions:
 
 import sqlite3
 import sys
-import math
+import json
 import random
-import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -68,14 +67,6 @@ C = {
     "pink":    "#FF7EB3",
 }
 
-CATEGORY_COLOR = {
-    "stable":               C["green"],
-    "flaky-mild":           C["amber"],
-    "flaky-moderate":       C["orange"],
-    "flaky-heavy":          C["red"],
-    "consistently_failing": "#C9304E",
-}
-
 FAILURE_COLOR = {
     "timeout":     C["amber"],
     "element":     C["blue"],
@@ -83,14 +74,6 @@ FAILURE_COLOR = {
     "data":        C["orange"],
     "environment": C["teal"],
     "unknown":     C["muted"],
-}
-
-CATEGORY_LABEL = {
-    "stable":               "Stable",
-    "flaky-mild":           "Flaky · Mild",
-    "flaky-moderate":       "Flaky · Moderate",
-    "flaky-heavy":          "Flaky · Heavy",
-    "consistently_failing": "Consistently Failing",
 }
 
 
@@ -389,34 +372,47 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-# DEMO DATABASE  (synthetic Phase-1-spec data — no analytics.db needed)
+# DEMO DATABASE  (synthetic data matching the company schema exactly)
 
 def _build_demo_db() -> sqlite3.Connection:
-    """Build a complete in-memory SQLite DB matching the Phase 1 spec."""
+    """Build a complete in-memory SQLite DB matching the company schema."""
     rng = random.Random(42)
 
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Only the three tables defined in the company schema
     conn.executescript("""
         CREATE TABLE runs (
-            run_id INTEGER PRIMARY KEY, build_number INTEGER,
-            timestamp TEXT, total_tests INTEGER,
-            passed INTEGER, failed INTEGER,
-            pass_rate REAL, environment TEXT, executor TEXT
-        );
-        CREATE TABLE tests (
-            test_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id INTEGER, test_name TEXT, status TEXT,
-            duration REAL, start_time TEXT, end_time TEXT
+            run_id        TEXT PRIMARY KEY,
+            team          TEXT NOT NULL,
+            suite_name    TEXT NOT NULL,
+            job_name      TEXT,
+            build_no      INTEGER,
+            timestamp     DATETIME NOT NULL,
+            duration_s    REAL,
+            total         INTEGER NOT NULL,
+            passed        INTEGER NOT NULL,
+            failed        INTEGER NOT NULL,
+            pass_rate_pct REAL,
+            environment   TEXT,
+            executor      TEXT
         );
         CREATE TABLE test_results (
-            result_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            test_id INTEGER UNIQUE, feature TEXT, priority TEXT,
-            category TEXT, fail_probability REAL
+            result_id   TEXT PRIMARY KEY,
+            run_id      TEXT NOT NULL REFERENCES runs(run_id),
+            suite_name  TEXT NOT NULL,
+            test_name   TEXT NOT NULL,
+            status      TEXT NOT NULL CHECK(status IN ('PASS', 'FAIL')),
+            duration_s  REAL,
+            failure_msg TEXT,
+            failure_kw  TEXT,
+            tags        TEXT
         );
-        CREATE TABLE failures (
-            failure_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            test_id INTEGER, category TEXT, message TEXT, keyword_name TEXT
+        CREATE TABLE ingestion_log (
+            run_id      TEXT PRIMARY KEY,
+            ingested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status      TEXT NOT NULL,
+            error_msg   TEXT
         );
     """)
 
@@ -472,13 +468,10 @@ def _build_demo_db() -> sqlite3.Connection:
             return f"CSV export contained {rows} rows — expected at least {mins} records for {rng2}", "Verify Row Count"
 
     def _dur(name, n, status):
-        # TC_User_BulkImport: progressive drift (Phase 1 DQ3)
         if name == "TC_User_BulkImport":
             base = rng.uniform(10, 14) if n <= 40 else rng.uniform(18, 24) if n <= 65 else rng.uniform(28, 36)
-        # TC_Dashboard_ExportChart: step change at run 51 (Phase 1 DQ3)
         elif name == "TC_Dashboard_ExportChart":
             base = rng.uniform(3, 5) if n <= 50 else rng.uniform(12, 15)
-        # TC_Login_ValidCredentials: seasonal alternation (Phase 1 DQ3)
         elif name == "TC_Login_ValidCredentials":
             base = rng.uniform(2.0, 3.5) if n % 2 == 0 else rng.uniform(4.5, 6.5)
         else:
@@ -492,8 +485,9 @@ def _build_demo_db() -> sqlite3.Connection:
 
     start_dt = datetime(2024, 10, 1)
     for n in range(1, 101):
-        ts = (start_dt + timedelta(hours=24 * (n - 1))).isoformat()
+        ts      = (start_dt + timedelta(hours=24 * (n - 1))).isoformat()
         anomaly = n in ANOMALY_RUNS
+        run_id  = f"TeamAlpha_build_{n:03d}"
 
         results = []
         for name, feat, pri, cat, fp in TESTS:
@@ -513,61 +507,93 @@ def _build_demo_db() -> sqlite3.Connection:
 
         passed = sum(1 for *_, s in results if s == "PASS")
         failed = 20 - passed
-        pr = round(passed * 100.0 / 20, 1)
+        pr     = round(passed * 100.0 / 20, 1)
 
         conn.execute(
-            "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?)",
-            (n, n, ts, 20, passed, failed, pr, "staging", f"jenkins-agent-{(n % 3) + 1:02d}"),
+            """INSERT INTO runs
+               (run_id, team, suite_name, job_name, build_no, timestamp,
+                duration_s, total, passed, failed, pass_rate_pct, environment, executor)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, "TeamAlpha", "Suite_Regression", "regression-job", n, ts,
+             None, 20, passed, failed, pr, "staging", f"jenkins-agent-{(n % 3) + 1:02d}"),
         )
+
         for name, feat, pri, cat, fp, status in results:
             dur = _dur(name, n, status)
-            conn.execute(
-                "INSERT INTO tests (run_id,test_name,status,duration,start_time,end_time) VALUES (?,?,?,?,?,?)",
-                (n, name, status, dur, ts, ts),
-            )
-            tid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "INSERT INTO test_results (test_id,feature,priority,category,fail_probability) VALUES (?,?,?,?,?)",
-                (tid, feat, pri, cat, fp),
-            )
+            tags = json.dumps([feat, pri, f"alpha_regression"])
+
+            failure_msg, failure_kw = None, None
             if status == "FAIL" and name in FAIL_CFG:
                 prim, sec, pp = FAIL_CFG[name]
                 fcat = prim if rng.random() < pp else sec
-                msg, kw = _fail_msg(fcat)
-                conn.execute(
-                    "INSERT INTO failures (test_id,category,message,keyword_name) VALUES (?,?,?,?)",
-                    (tid, fcat, msg, kw),
-                )
+                failure_msg, failure_kw = _fail_msg(fcat)
+
+            result_id = f"{run_id}_{name}"
+            conn.execute(
+                """INSERT INTO test_results
+                   (result_id, run_id, suite_name, test_name, status,
+                    duration_s, failure_msg, failure_kw, tags)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (result_id, run_id, "Suite_Regression", name, status,
+                 dur, failure_msg, failure_kw, tags),
+            )
+
     conn.commit()
     return conn
 
 
 # DATA FETCHERS
+# All queries use only: runs, test_results, ingestion_log
+# Column names match the company schema exactly.
 
 def fetch_all_runs(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Fetch all runs ordered chronologically. Aliased for dashboard compatibility."""
     return pd.read_sql_query(
-        "SELECT run_id, timestamp, passed, failed, total_tests, pass_rate, environment, executor "
-        "FROM runs ORDER BY run_id",
+        """
+        SELECT
+            run_id,
+            timestamp,
+            passed,
+            failed,
+            total                AS total_tests,
+            pass_rate_pct        AS pass_rate,
+            environment,
+            executor
+        FROM runs
+        ORDER BY build_no, run_id
+        """,
         conn,
     )
 
 
-def fetch_run_options(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+def fetch_run_options(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """Return [(run_id, label), ...] for the run selector drop-down."""
     df = pd.read_sql_query(
-        "SELECT run_id, timestamp, pass_rate FROM runs ORDER BY run_id DESC",
+        "SELECT run_id, timestamp, pass_rate_pct FROM runs ORDER BY build_no DESC, run_id DESC",
         conn,
     )
     return [
-        (int(row.run_id), f"Run #{int(row.run_id)}  —  {str(row.timestamp)[:10]}  —  {row.pass_rate:.1f}%")
+        (str(row.run_id),
+         f"{str(row.run_id)}  —  {str(row.timestamp)[:10]}  —  {row.pass_rate_pct:.1f}%")
         for _, row in df.iterrows()
     ]
 
 
-def fetch_run_by_id(conn: sqlite3.Connection, run_id: int) -> dict:
+def fetch_run_by_id(conn: sqlite3.Connection, run_id: str) -> dict:
     df = pd.read_sql_query(
-        "SELECT run_id, timestamp, passed, failed, total_tests, pass_rate, environment, executor "
-        "FROM runs WHERE run_id = ?",
+        """
+        SELECT
+            run_id,
+            timestamp,
+            passed,
+            failed,
+            total         AS total_tests,
+            pass_rate_pct AS pass_rate,
+            environment,
+            executor
+        FROM runs
+        WHERE run_id = ?
+        """,
         conn, params=(run_id,),
     )
     return df.iloc[0].to_dict() if len(df) else {}
@@ -575,59 +601,116 @@ def fetch_run_by_id(conn: sqlite3.Connection, run_id: int) -> dict:
 
 def fetch_latest_run(conn: sqlite3.Connection) -> dict:
     df = pd.read_sql_query(
-        "SELECT run_id, timestamp, passed, failed, total_tests, pass_rate, environment, executor "
-        "FROM runs ORDER BY run_id DESC LIMIT 1",
+        """
+        SELECT
+            run_id,
+            timestamp,
+            passed,
+            failed,
+            total         AS total_tests,
+            pass_rate_pct AS pass_rate,
+            environment,
+            executor
+        FROM runs
+        ORDER BY build_no DESC, run_id DESC
+        LIMIT 1
+        """,
         conn,
     )
     return df.iloc[0].to_dict() if len(df) else {}
 
 
-def fetch_failures_for_run(conn: sqlite3.Connection, run_id: int) -> pd.DataFrame:
-    return pd.read_sql_query(
+def fetch_failures_for_run(conn: sqlite3.Connection, run_id: str) -> pd.DataFrame:
+    """
+    Return all failed tests for a given run_id.
+
+    In the company schema failure info (message, keyword) lives directly in
+    test_results — there is no separate failures table or test_results join.
+    We derive a failure_category from the message text in Python after fetching.
+    """
+    df = pd.read_sql_query(
         """
         SELECT
-            t.test_name,
-            t.duration,
-            tr.feature,
-            tr.category                              AS test_category,
-            COALESCE(f.category, 'unknown')          AS failure_category,
-            COALESCE(f.message, '(no message)')      AS failure_message,
-            COALESCE(f.keyword_name, '—')            AS keyword_name
-        FROM tests t
-        JOIN test_results tr ON t.test_id = tr.test_id
-        LEFT JOIN failures f ON t.test_id = f.test_id
-        WHERE t.run_id = ? AND t.status = 'FAIL'
-        ORDER BY tr.category DESC, t.test_name
+            tr.test_name,
+            tr.duration_s                                        AS duration,
+            COALESCE(tr.failure_msg, '(no message)')             AS failure_message,
+            COALESCE(tr.failure_kw,  '—')                        AS keyword_name,
+            tr.tags
+        FROM test_results tr
+        WHERE tr.run_id = ?
+          AND tr.status = 'FAIL'
+        ORDER BY tr.test_name
         """,
         conn, params=(run_id,),
     )
+    if df.empty:
+        return df
+
+    # Derive failure_category from the message — mirrors the pipeline classification
+    df["failure_category"] = df["failure_message"].apply(_classify_failure_message)
+
+    # Extract a feature tag (first tag starting with "feature_") from the JSON tags column
+    def _feature(tags_json):
+        try:
+            tags = json.loads(tags_json or "[]")
+            for t in tags:
+                if t.startswith("feature_"):
+                    return t.replace("feature_", "")
+        except Exception:
+            pass
+        return ""
+
+    df["feature"] = df["tags"].apply(_feature)
+    return df
+
+
+def _classify_failure_message(message: str) -> str:
+    """Derive a failure category from a failure message string."""
+    if not message or message == "(no message)":
+        return "unknown"
+    lower = message.lower()
+    if "still visible after" in lower and "timeout" in lower:
+        return "timeout"
+    if "not found after" in lower and "retries" in lower:
+        return "element"
+    if "expected http status" in lower:
+        return "assertion"
+    if "csv export contained" in lower and "rows" in lower:
+        return "data"
+    if "environment" in lower or "unreachable" in lower:
+        return "environment"
+    return "data"
 
 
 def fetch_flaky_scores(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Per-test flip count, failure rate, and category."""
+    """
+    Per-test flip count, failure rate.
+
+    In the company schema test_results has one row per (run, test).
+    We join runs only for ordering by build_no to get chronological order.
+    """
     return pd.read_sql_query(
         """
         WITH ordered AS (
             SELECT
-                t.test_name,
-                t.run_id,
-                t.status,
-                tr.category,
-                tr.fail_probability,
-                LAG(t.status) OVER (PARTITION BY t.test_name ORDER BY t.run_id) AS prev_status
-            FROM tests t
-            JOIN test_results tr ON t.test_id = tr.test_id
+                tr.test_name,
+                tr.run_id,
+                tr.status,
+                LAG(tr.status) OVER (
+                    PARTITION BY tr.test_name
+                    ORDER BY r.build_no, tr.run_id
+                ) AS prev_status
+            FROM test_results tr
+            JOIN runs r ON tr.run_id = r.run_id
         )
         SELECT
             test_name,
-            category,
-            fail_probability,
             COUNT(CASE WHEN status <> prev_status AND prev_status IS NOT NULL THEN 1 END) AS flip_count,
             COUNT(CASE WHEN status = 'FAIL' THEN 1 END)  AS fail_count,
             COUNT(*)                                      AS total_runs,
             ROUND(COUNT(CASE WHEN status = 'FAIL' THEN 1 END) * 100.0 / COUNT(*), 1) AS failure_rate
         FROM ordered
-        GROUP BY test_name, category, fail_probability
+        GROUP BY test_name
         ORDER BY flip_count DESC, failure_rate DESC
         """,
         conn,
@@ -636,15 +719,19 @@ def fetch_flaky_scores(conn: sqlite3.Connection) -> pd.DataFrame:
 
 def fetch_duration_series(conn: sqlite3.Connection, test_name: str) -> pd.DataFrame:
     """
-    Return per-run duration and status for one test, sorted by run_id.
+    Return per-run duration and status for one test, sorted chronologically.
     Used by the Q4 duration drift chart.
     """
     return pd.read_sql_query(
         """
-        SELECT t.run_id, t.duration, t.status
-        FROM tests t
-        WHERE t.test_name = ?
-        ORDER BY t.run_id
+        SELECT
+            r.build_no  AS run_id,
+            tr.duration_s AS duration,
+            tr.status
+        FROM test_results tr
+        JOIN runs r ON tr.run_id = r.run_id
+        WHERE tr.test_name = ?
+        ORDER BY r.build_no, tr.run_id
         """,
         conn, params=(test_name,),
     )
@@ -653,7 +740,12 @@ def fetch_duration_series(conn: sqlite3.Connection, test_name: str) -> pd.DataFr
 def fetch_week_on_week(conn: sqlite3.Connection) -> dict:
     """Compare latest 7 runs vs the 7 before that."""
     df = pd.read_sql_query(
-        "SELECT run_id, pass_rate, passed, failed FROM runs ORDER BY run_id DESC LIMIT 14",
+        """
+        SELECT run_id, pass_rate_pct AS pass_rate, passed, failed
+        FROM runs
+        ORDER BY build_no DESC, run_id DESC
+        LIMIT 14
+        """,
         conn,
     )
     if len(df) < 2:
@@ -665,12 +757,12 @@ def fetch_week_on_week(conn: sqlite3.Connection) -> dict:
     this_avg = this_w["pass_rate"].mean()
     last_avg = last_w["pass_rate"].mean()
 
-    latest_run = int(df["run_id"].iloc[0])
-    prev_run   = int(df["run_id"].iloc[half])
+    latest_run = str(df["run_id"].iloc[0])
+    prev_run   = str(df["run_id"].iloc[half])
 
     def _failed_names(rid):
         r = pd.read_sql_query(
-            "SELECT DISTINCT test_name FROM tests WHERE run_id=? AND status='FAIL'",
+            "SELECT DISTINCT test_name FROM test_results WHERE run_id=? AND status='FAIL'",
             conn, params=(rid,),
         )
         return set(r["test_name"].tolist())
@@ -689,8 +781,8 @@ def fetch_week_on_week(conn: sqlite3.Connection) -> dict:
 
 def compute_anomalies(df_runs: pd.DataFrame) -> pd.DataFrame:
     """Add rolling mean, std, z-score, and anomaly flag columns."""
-    df = df_runs.copy().sort_values("run_id").reset_index(drop=True)
-    roll          = df["pass_rate"].rolling(window=ROLLING_WINDOW, min_periods=3)
+    df = df_runs.copy().reset_index(drop=True)
+    roll            = df["pass_rate"].rolling(window=ROLLING_WINDOW, min_periods=3)
     df["roll_mean"] = roll.mean().shift(1)
     df["roll_std"]  = roll.std().shift(1).fillna(5.0)
     df["z_score"]   = (df["roll_mean"] - df["pass_rate"]) / df["roll_std"].clip(lower=1.0)
@@ -702,15 +794,6 @@ def compute_anomalies(df_runs: pd.DataFrame) -> pd.DataFrame:
 
 def _badge(text: str, kind: str) -> str:
     return f'<span class="mc-badge badge-{kind}">{text}</span>'
-
-
-def _category_badge(cat: str) -> str:
-    color_map = {
-        "stable": "green", "flaky-mild": "amber",
-        "flaky-moderate": "orange", "flaky-heavy": "red",
-        "consistently_failing": "red",
-    }
-    return _badge(CATEGORY_LABEL.get(cat, cat), color_map.get(cat, "blue"))
 
 
 def _failure_badge(fcat: str) -> str:
@@ -742,9 +825,9 @@ def chart_trend(df_all: pd.DataFrame, show_n: int) -> go.Figure:
     fig = go.Figure(layout=dark_layout(height=380, margin=dict(l=10, r=20, t=10, b=30)))
 
     for lo, hi, col in [
-        (0,              AMBER_THRESHOLD, "rgba(248,81,73,0.09)"),
+        (0,               AMBER_THRESHOLD, "rgba(248,81,73,0.09)"),
         (AMBER_THRESHOLD, GREEN_THRESHOLD, "rgba(210,153,34,0.09)"),
-        (GREEN_THRESHOLD, 100,            "rgba(63,185,80,0.06)"),
+        (GREEN_THRESHOLD, 100,             "rgba(63,185,80,0.06)"),
     ]:
         fig.add_hrect(y0=lo, y1=hi, fillcolor=col, line_width=0, layer="below")
 
@@ -759,7 +842,7 @@ def chart_trend(df_all: pd.DataFrame, show_n: int) -> go.Figure:
         )
 
     fig.add_trace(go.Scatter(
-        x=display_df["run_id"], y=display_df["roll_mean"],
+        x=display_df.index, y=display_df["roll_mean"],
         mode="lines",
         line=dict(color="rgba(139,148,158,0.53)", width=1.5, dash="dot"),
         name=f"Rolling mean ({ROLLING_WINDOW} runs)",
@@ -767,33 +850,34 @@ def chart_trend(df_all: pd.DataFrame, show_n: int) -> go.Figure:
     ))
 
     fig.add_trace(go.Scatter(
-        x=display_df["run_id"], y=display_df["pass_rate"],
+        x=display_df.index, y=display_df["pass_rate"],
         mode="lines+markers",
         line=dict(color=C["blue"], width=2.5),
         fill="tozeroy",
         fillcolor="rgba(88,166,255,0.09)",
         marker=dict(size=4, color=C["blue"]),
         name="Pass rate %",
-        hovertemplate="<b>Run %{x}</b><br>Pass rate: <b>%{y:.1f}%</b><br><extra></extra>",
+        customdata=display_df["run_id"],
+        hovertemplate="<b>%{customdata}</b><br>Pass rate: <b>%{y:.1f}%</b><br><extra></extra>",
     ))
 
     anom = display_df[display_df["anomaly"]]
     if len(anom):
         fig.add_trace(go.Scatter(
-            x=anom["run_id"], y=anom["pass_rate"],
+            x=anom.index, y=anom["pass_rate"],
             mode="markers",
             marker=dict(size=11, color=C["red"], symbol="circle", line=dict(color="#fff", width=1.5)),
             name="⚠ Anomaly",
+            customdata=list(zip(anom["run_id"], anom["z_score"])),
             hovertemplate=(
-                "<b>⚠ ANOMALY — Run %{x}</b><br>"
+                "<b>⚠ ANOMALY — %{customdata[0]}</b><br>"
                 "Pass rate: <b>%{y:.1f}%</b><br>"
-                "Z-score: %{customdata:.2f}σ below baseline<br><extra></extra>"
+                "Z-score: %{customdata[1]:.2f}σ below baseline<br><extra></extra>"
             ),
-            customdata=anom["z_score"],
         ))
 
     fig.update_layout(
-        xaxis=dict(title=dict(text="Run #", font=dict(size=10, color=C["muted"])), dtick=5),
+        xaxis=dict(title=dict(text="Run", font=dict(size=10, color=C["muted"])), dtick=5),
         yaxis=dict(title=dict(text="Pass Rate (%)", font=dict(size=10, color=C["muted"])), range=[0, 102]),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
         hovermode="x unified",
@@ -809,7 +893,6 @@ def chart_flaky(df: pd.DataFrame) -> go.Figure:
 
     df = df.sort_values("flip_count", ascending=True)
     df["short_name"] = df["test_name"].str.replace("TC_", "", regex=False)
-    colors = [CATEGORY_COLOR.get(c, C["blue"]) for c in df["category"]]
 
     fig = go.Figure(layout=dark_layout(
         height=max(320, len(df) * 42 + 60),
@@ -820,20 +903,16 @@ def chart_flaky(df: pd.DataFrame) -> go.Figure:
         y=df["short_name"],
         x=df["flip_count"],
         orientation="h",
-        marker=dict(color=colors, opacity=0.88, line=dict(color=C["border"], width=0.5)),
+        marker=dict(color=C["blue"], opacity=0.88, line=dict(color=C["border"], width=0.5)),
         text=df["flip_count"],
         textposition="outside",
         textfont=dict(family="JetBrains Mono", size=11, color=C["txt"]),
         hovertemplate=(
             "<b>%{customdata[0]}</b><br>"
             "Flips: <b>%{x}</b><br>"
-            "Failure rate: <b>%{customdata[1]:.1f}%</b><br>"
-            "Category: %{customdata[2]}<br><extra></extra>"
+            "Failure rate: <b>%{customdata[1]:.1f}%</b><br><extra></extra>"
         ),
-        customdata=list(zip(
-            df["test_name"], df["failure_rate"],
-            [CATEGORY_LABEL.get(c, c) for c in df["category"]],
-        )),
+        customdata=list(zip(df["test_name"], df["failure_rate"])),
         name="",
     ))
 
@@ -847,13 +926,7 @@ def chart_flaky(df: pd.DataFrame) -> go.Figure:
 
 
 def chart_failure_dist(df_failures: pd.DataFrame) -> go.Figure | None:
-    """
-    Mini donut chart — failure category breakdown for one run.
-
-    Returns None when there are no failures so the caller can skip rendering.
-    Previously this function was defined but never called (dead code).
-    It is now rendered inside render_q3() alongside the failure table.
-    """
+    """Mini donut chart — failure category breakdown for one run."""
     if df_failures.empty:
         return None
 
@@ -877,16 +950,7 @@ def chart_failure_dist(df_failures: pd.DataFrame) -> go.Figure | None:
 
 
 def chart_duration_drift(df_dur: pd.DataFrame, test_name: str) -> go.Figure:
-    """
-    Q4 — Duration over time for one test, coloured by PASS/FAIL status.
-
-    This chart surfaces the DQ3 patterns from Phase 1 without any ML:
-      • TC_User_BulkImport     → progressive drift (visible upward slope)
-      • TC_Dashboard_ExportChart → step change at run 51
-      • TC_Login_ValidCredentials → seasonal alternation (even/odd)
-
-    The same data feeds Phase 4 ML4 (rolling Z-score per test).
-    """
+    """Q4 — Duration over time for one test, coloured by PASS/FAIL status."""
     if df_dur.empty:
         return go.Figure(layout=dark_layout(height=280))
 
@@ -895,7 +959,6 @@ def chart_duration_drift(df_dur: pd.DataFrame, test_name: str) -> go.Figure:
 
     fig = go.Figure(layout=dark_layout(height=280, margin=dict(l=10, r=20, t=10, b=30)))
 
-    # Rolling mean line (5-run window) — baseline reference
     df_dur_sorted = df_dur.sort_values("run_id").copy()
     df_dur_sorted["roll_mean"] = df_dur_sorted["duration"].rolling(window=5, min_periods=2).mean()
     fig.add_trace(go.Scatter(
@@ -907,7 +970,6 @@ def chart_duration_drift(df_dur: pd.DataFrame, test_name: str) -> go.Figure:
         hovertemplate="Rolling mean: %{y:.2f}s<extra></extra>",
     ))
 
-    # PASS durations
     if not pass_df.empty:
         fig.add_trace(go.Scatter(
             x=pass_df["run_id"], y=pass_df["duration"],
@@ -917,7 +979,6 @@ def chart_duration_drift(df_dur: pd.DataFrame, test_name: str) -> go.Figure:
             hovertemplate="Run %{x} · PASS · %{y:.2f}s<extra></extra>",
         ))
 
-    # FAIL durations
     if not fail_df.empty:
         fig.add_trace(go.Scatter(
             x=fail_df["run_id"], y=fail_df["duration"],
@@ -939,17 +1000,6 @@ def chart_duration_drift(df_dur: pd.DataFrame, test_name: str) -> go.Figure:
 # SIDEBAR
 
 def render_sidebar(df_all: pd.DataFrame, conn: sqlite3.Connection, db_path: str):
-    """
-    Render sidebar controls.
-
-    Returns
-    -------
-    tuple:
-        trend_window      (int)  — number of runs for the Q2 trend chart
-        show_stable_flaky (bool) — include 0-flip tests in Q4
-        selected_run_id   (int)  — run chosen in the Q3 run selector
-        drift_test        (str)  — test name for the Q4 duration drift chart
-    """
     with st.sidebar:
         st.markdown(
             f'<div style="font:700 1.1rem/1 \'IBM Plex Sans\',sans-serif; '
@@ -959,7 +1009,6 @@ def render_sidebar(df_all: pd.DataFrame, conn: sqlite3.Connection, db_path: str)
             unsafe_allow_html=True,
         )
 
-        # ── Q2 trend window ───────────────────────────────────────────────────
         st.markdown(
             f'<div style="font:600 0.7rem/1 \'JetBrains Mono\',monospace; '
             f'text-transform:uppercase; letter-spacing:.1em; color:{C["muted"]}; '
@@ -971,7 +1020,6 @@ def render_sidebar(df_all: pd.DataFrame, conn: sqlite3.Connection, db_path: str)
             help="Number of most-recent runs shown in the Q2 trend chart",
         )
 
-        # ── Q3 run selector ───────────────────────────────────────────────────
         st.markdown("---")
         st.markdown(
             f'<div style="font:600 0.7rem/1 \'JetBrains Mono\',monospace; '
@@ -980,7 +1028,6 @@ def render_sidebar(df_all: pd.DataFrame, conn: sqlite3.Connection, db_path: str)
             unsafe_allow_html=True,
         )
         run_options = fetch_run_options(conn)
-        # Default to the latest run (first in the DESC-sorted list)
         run_labels  = [label for _, label in run_options]
         run_ids     = [rid   for rid, _  in run_options]
 
@@ -993,7 +1040,6 @@ def render_sidebar(df_all: pd.DataFrame, conn: sqlite3.Connection, db_path: str)
         )
         selected_run_id = run_ids[selected_idx]
 
-        # ── Q4 controls ───────────────────────────────────────────────────────
         st.markdown("---")
         st.markdown(
             f'<div style="font:600 0.7rem/1 \'JetBrains Mono\',monospace; '
@@ -1012,7 +1058,6 @@ def render_sidebar(df_all: pd.DataFrame, conn: sqlite3.Connection, db_path: str)
             help="Choose a test to show its duration pattern over 100 runs",
         )
 
-        # ── DB info ───────────────────────────────────────────────────────────
         st.markdown("---")
         st.markdown(
             f'<div style="font:600 0.7rem/1 \'JetBrains Mono\',monospace; '
@@ -1061,7 +1106,7 @@ def render_header(latest: dict) -> None:
         f'    <div class="dash-subtitle">Suite_Regression · Robot Framework</div>'
         f'  </div>'
         f'  <div class="dash-right">'
-        f'    Latest build: <b style="color:{C["txt"]}">#{build}</b><br>'
+        f'    Latest build: <b style="color:{C["txt"]}">{build}</b><br>'
         f'    Environment: {env} · Executor: {exec_}<br>'
         f'    Timestamp: {ts_str}'
         f'  </div>'
@@ -1078,7 +1123,7 @@ def render_q1(latest: dict, df_all: pd.DataFrame) -> None:
     passed = int(latest.get("passed", 0))
     failed = int(latest.get("failed", 0))
     total  = int(latest.get("total_tests", 20))
-    run_id = int(latest.get("run_id", 0))
+    run_id = latest.get("run_id", "—")
 
     if pr >= GREEN_THRESHOLD:
         val_cls, card_cls, badge_kind, status_text = "green", "mc-green", "green", "✅  HEALTHY"
@@ -1098,7 +1143,7 @@ def render_q1(latest: dict, df_all: pd.DataFrame) -> None:
             f'<div class="metric-card {card_cls}">'
             f'  <div class="mc-label">Current Pass Rate</div>'
             f'  <div class="mc-value {val_cls}">{pr:.1f}%</div>'
-            f'  <div class="mc-sub">{passed} passed · {failed} failed · {total} total  |  run #{run_id}</div>'
+            f'  <div class="mc-sub">{passed} passed · {failed} failed · {total} total  |  {run_id}</div>'
             f'  <div class="mc-badge badge-{badge_kind}">{status_text}</div>'
             f'</div>',
             unsafe_allow_html=True,
@@ -1124,7 +1169,7 @@ def render_q1(latest: dict, df_all: pd.DataFrame) -> None:
             unsafe_allow_html=True,
         )
     with c4:
-        worst_cls  = "red" if worst_recent < AMBER_THRESHOLD else "amber"
+        worst_cls = "red" if worst_recent < AMBER_THRESHOLD else "amber"
         st.markdown(
             f'<div class="metric-card mc-{worst_cls}">'
             f'  <div class="mc-label">Worst (Last 10)</div>'
@@ -1171,41 +1216,33 @@ def render_q2(df_all: pd.DataFrame, trend_window: int) -> None:
     )
 
 
-def render_q3(conn: sqlite3.Connection, selected_run_id: int) -> None:
-    """
-    Q3 — Which tests broke today?
-
-    Shows the failure table (left) and the failure-category donut (right)
-    for the run selected in the sidebar.  Previously the donut chart was
-    defined in chart_failure_dist() but never rendered — that is fixed here.
-    """
+def render_q3(conn: sqlite3.Connection, selected_run_id: str) -> None:
+    """Q3 — Which tests broke today?"""
     df     = fetch_failures_for_run(conn, selected_run_id)
     run_md = fetch_run_by_id(conn, selected_run_id)
     n      = len(df)
     pr     = run_md.get("pass_rate", "—")
 
     _section("Q3", "Which Tests Broke?",
-             f"Run #{selected_run_id}  ·  {n} failure{'s' if n != 1 else ''}  ·  pass rate {pr}%")
+             f"{selected_run_id}  ·  {n} failure{'s' if n != 1 else ''}  ·  pass rate {pr}%")
 
     if df.empty:
         st.markdown(
-            f'<div class="info-banner">✅  No failures in run #{selected_run_id} — all tests passed!</div>',
+            f'<div class="info-banner">✅  No failures in {selected_run_id} — all tests passed!</div>',
             unsafe_allow_html=True,
         )
         return
 
-    # Two-column layout: failures table (wider) + category donut (narrower)
     col_table, col_donut = st.columns([2.6, 1])
 
     with col_table:
         rows = ""
         for _, row in df.iterrows():
-            feat = row.get("feature", "").replace("feature_", "")
+            feat = row.get("feature", "")
             rows += f"""
             <tr>
                 <td><span class="tname">{row['test_name']}</span><br>
                     <span class="tkw">⌗ {feat}</span></td>
-                <td>{_category_badge(row.get('test_category', ''))}</td>
                 <td>{_failure_badge(row.get('failure_category', 'unknown'))}</td>
                 <td><span class="tmsg">{row.get('failure_message', '')}</span><br>
                     <span class="tkw">via {row.get('keyword_name', '—')}</span></td>
@@ -1216,7 +1253,7 @@ def render_q3(conn: sqlite3.Connection, selected_run_id: int) -> None:
         <table class="fail-table">
           <thead>
             <tr>
-              <th>Test Name</th><th>Category</th>
+              <th>Test Name</th>
               <th>Failure Type</th><th>Failure Message</th><th>Duration</th>
             </tr>
           </thead>
@@ -1235,7 +1272,6 @@ def render_q3(conn: sqlite3.Connection, selected_run_id: int) -> None:
             st.plotly_chart(fig_donut, use_container_width=True,
                             config={"displayModeBar": False})
 
-        # Category count pills below the donut
         cat_counts = df["failure_category"].value_counts()
         for cat, cnt in cat_counts.items():
             col = FAILURE_COLOR.get(str(cat), C["muted"])
@@ -1252,20 +1288,13 @@ def render_q3(conn: sqlite3.Connection, selected_run_id: int) -> None:
 
 
 def render_q4(conn: sqlite3.Connection, show_stable: bool, drift_test: str) -> None:
-    """
-    Q4 — Which tests are flaky?
-
-    Top section: flip-count bar chart (existing).
-    Bottom section: duration drift chart for the test selected in the sidebar.
-    This surfaces Phase 1 DQ3 patterns visually and feeds Phase 4 ML4.
-    """
-    df = fetch_flaky_scores(conn)
+    """Q4 — Which tests are flaky?"""
+    df       = fetch_flaky_scores(conn)
     df_chart = df[df["flip_count"] > 0].copy() if not show_stable else df.copy()
 
     _section("Q4", "Which Tests Are Flaky?",
              f"{len(df_chart)} tests with ≥1 PASS↔FAIL flip")
 
-    # ── Flip-count bar chart ──────────────────────────────────────────────────
     if df_chart.empty:
         st.markdown(
             '<div class="info-banner">ℹ️  No PASS↔FAIL flips found — all tests are stable.</div>',
@@ -1279,28 +1308,6 @@ def render_q4(conn: sqlite3.Connection, show_stable: bool, drift_test: str) -> N
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
         with col_legend:
-            st.markdown(
-                f'<div style="font:600 0.7rem/1 \'JetBrains Mono\',monospace; '
-                f'text-transform:uppercase; letter-spacing:.1em; color:{C["muted"]}; '
-                f'padding-top:.4rem; margin-bottom:.7rem;">Category Key</div>',
-                unsafe_allow_html=True,
-            )
-            for cat, col in CATEGORY_COLOR.items():
-                count = int((df_chart["category"] == cat).sum())
-                if count > 0:
-                    st.markdown(
-                        f'<div style="display:flex; align-items:center; gap:8px; '
-                        f'margin-bottom:.5rem; font-size:.78rem;">'
-                        f'<span style="width:10px; height:10px; border-radius:50%; '
-                        f'background:{col}; flex-shrink:0;"></span>'
-                        f'<span style="color:{C["txt"]}">{CATEGORY_LABEL.get(cat, cat)}</span>'
-                        f'<span style="margin-left:auto; font-family:\'JetBrains Mono\',monospace; '
-                        f'color:{C["muted"]};">{count}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-
-            st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
-
             top3 = df_chart.head(3)
             if len(top3):
                 st.markdown(
@@ -1310,10 +1317,9 @@ def render_q4(conn: sqlite3.Connection, show_stable: bool, drift_test: str) -> N
                     unsafe_allow_html=True,
                 )
                 for rank, (_, row) in enumerate(top3.iterrows(), 1):
-                    col_r = CATEGORY_COLOR.get(row["category"], C["blue"])
                     st.markdown(
                         f'<div style="background:{C["card"]}; border:1px solid {C["border"]}; '
-                        f'border-left:3px solid {col_r}; border-radius:6px; '
+                        f'border-left:3px solid {C["blue"]}; border-radius:6px; '
                         f'padding:.55rem .75rem; margin-bottom:.5rem;">'
                         f'<div style="font:600 .78rem/1 \'JetBrains Mono\',monospace; '
                         f'color:{C["txt"]}; margin-bottom:.25rem;">'
@@ -1324,7 +1330,6 @@ def render_q4(conn: sqlite3.Connection, show_stable: bool, drift_test: str) -> N
                         unsafe_allow_html=True,
                     )
 
-    # ── Duration drift chart ──────────────────────────────────────────────────
     st.markdown(
         f'<div style="font:600 0.7rem/1 \'JetBrains Mono\',monospace; '
         f'text-transform:uppercase; letter-spacing:.1em; color:{C["muted"]}; '
@@ -1334,11 +1339,10 @@ def render_q4(conn: sqlite3.Connection, show_stable: bool, drift_test: str) -> N
         unsafe_allow_html=True,
     )
 
-    df_dur = fetch_duration_series(conn, drift_test)
+    df_dur    = fetch_duration_series(conn, drift_test)
     fig_drift = chart_duration_drift(df_dur, drift_test)
     st.plotly_chart(fig_drift, use_container_width=True, config={"displayModeBar": False})
 
-    # Contextual insight per test
     drift_insights = {
         "TC_User_BulkImport":
             "📈  <b>Progressive drift</b> — duration increases across three phases "
@@ -1377,7 +1381,7 @@ def render_q5(conn: sqlite3.Connection) -> None:
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        if delta_pr >= 2:   pr_color, pr_arrow = C["green"], "▲"
+        if delta_pr >= 2:    pr_color, pr_arrow = C["green"], "▲"
         elif delta_pr <= -2: pr_color, pr_arrow = C["red"],   "▼"
         else:                pr_color, pr_arrow = C["muted"], "—"
         sign = "+" if delta_pr > 0 else ""
@@ -1424,8 +1428,8 @@ def render_q5(conn: sqlite3.Connection) -> None:
         color = C["green"]
     elif delta_pr <= -2 or new_fails > 0:
         parts = []
-        if new_fails > 0:   parts.append(f"{new_fails} new failure(s) introduced")
-        if delta_pr < -2:   parts.append(f"pass rate dropped {abs(delta_pr):.1f}pp")
+        if new_fails > 0:  parts.append(f"{new_fails} new failure(s) introduced")
+        if delta_pr < -2:  parts.append(f"pass rate dropped {abs(delta_pr):.1f}pp")
         msg   = "📉  Regression detected — " + " and ".join(parts) + ". Investigate before next sprint."
         color = C["red"]
     else:
