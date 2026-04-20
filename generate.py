@@ -1,3 +1,9 @@
+"""
+Usage:
+    python generate.py
+    python generate.py --output-dir ./runs --num-runs 100
+"""
+
 import argparse
 import json
 import os
@@ -66,6 +72,22 @@ def run_pass_rate(n, anomaly_runs, anomaly_pass_rate):
     elif 38 <= n <= 45: return random.uniform(0.60, 0.65)
     elif 46 <= n <= 75: return random.uniform(0.65, 0.80)
     else:               return random.uniform(0.82, 0.95)
+
+
+def get_program_name(n, total_runs):
+    """Return program name for run n based on proportional alpha/beta/gamma split."""
+    alpha_count = max(1, round(total_runs * 0.20))
+    beta_count = max(1, round(total_runs * 0.30))
+    if alpha_count + beta_count >= total_runs:
+        beta_count = max(1, total_runs - alpha_count)
+    alpha_threshold = alpha_count
+    beta_threshold = alpha_count + beta_count
+
+    if n <= alpha_threshold:
+        return "alpha"
+    elif n <= beta_threshold:
+        return "beta"
+    return "gamma"
 
 # DURATION PATTERNS
 def base_duration(test_name, n, rng):
@@ -255,11 +277,14 @@ def build_run(n, config, rng):
     root.set("rpa", "FALSE")
     root.set("schemaversion", "4")
 
+    # Determine program and suite source by run number
+    program = get_program_name(n, config["num_runs"])
+
     # Suite element
     suite = ET.SubElement(root, "suite")
     suite.set("id", "s1")
-    suite.set("name", config["suite_name"])
-    suite.set("source", f"/opt/ci/tests/alpha/{config['suite_name']}.robot")
+    suite.set("name", program)
+    suite.set("source", f"/opt/ci/tests/{program}/{program}.robot")
 
     # Suite setup kw
     setup_end = suite_start + timedelta(milliseconds=110)
@@ -270,7 +295,7 @@ def build_run(n, config, rng):
     setup_msg = ET.SubElement(kw_setup, "msg")
     setup_msg.set("timestamp", generated_s)
     setup_msg.set("level", "INFO")
-    setup_msg.text = f"Suite {config['suite_name']} initialized — team {config['team_name']}"
+    setup_msg.text = f"Suite {program} initialized — team {config['team_name']}"
 
     setup_status = ET.SubElement(kw_setup, "status")
     setup_status.set("status", "PASS")
@@ -386,7 +411,8 @@ def build_run(n, config, rng):
     total = passed + failed
     meta = {
         "team":          config["team_name"],
-        "suite":         config["suite_name"],
+        "suite":         program,
+        "program":       program,
         "build_no":      n,
         "timestamp":     run_dt.isoformat(),
         "total":         total,
@@ -409,7 +435,8 @@ def generate(config):
     os.makedirs(out, exist_ok=True)
 
     for n in range(1, num + 1):
-        folder = os.path.join(out, f"{config['team_name']}_build_{n:03d}")
+        program = get_program_name(n, num)
+        folder = os.path.join(out, f"{program}_build_{n:03d}")
         os.makedirs(folder, exist_ok=True)
 
         xml, meta = build_run(n, config, rng)
