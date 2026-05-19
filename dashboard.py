@@ -1,22 +1,14 @@
 """
-Phase 3 — Automation Test Stability Analytics Dashboard (schema.sql-aligned)
-==============================================================================
-
-UI/UX improvements:
-  - Merged Q1+Q5 → Weekly Health
-  - Duration Drift as separate section with sidebar control
-  - Sankey moved to Q3 (Run Inspector)
-  - Heatmap + Stability Spectrum combined into Test Health Matrix
-  - Dynamic header showing actual program (Alpha/Beta/Gamma)
-  - Run selector now shows all runs (no 50‑run cap)
+Test Stability Analytics Dashboard
+====================================
+Streamlit dashboard for CI test run analytics backed by schema.sql.
 
 Usage:
-  streamlit run dashboard2.py
-  streamlit run dashboard2.py -- --db ./analytics.db
-  streamlit run dashboard2.py -- --db ./analytics.db ./teambravo.db
+  streamlit run dashboard.py
+  streamlit run dashboard.py -- --db ./analytics.db
+  streamlit run dashboard.py -- --db ./analytics.db ./teambravo.db
 """
 
-import math
 import random
 import sqlite3
 import sys
@@ -28,20 +20,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# Import pipeline2 utilities for multi-DB support and data helpers
 try:
-    from pipeline2 import (
-        load_multi_db,
-        get_heatmap_matrix,
-        get_sankey_data,
-        get_flaky_scores,
-        open_connections,
-    )
+    from pipeline2 import load_multi_db
     PIPELINE2_AVAILABLE = True
 except ImportError:
     PIPELINE2_AVAILABLE = False
 
-# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Test Stability Analytics",
     page_icon="⚡",
@@ -49,7 +33,6 @@ st.set_page_config(
     initial_sidebar_state="auto",
 )
 
-# ── CONSTANTS ─────────────────────────────────────────────────────────────────
 DEFAULT_DB = "./analytics.db"
 GREEN_THRESHOLD = 80.0
 AMBER_THRESHOLD = 60.0
@@ -62,7 +45,6 @@ DURATION_TESTS = [
     "TC_Login_ValidCredentials",
 ]
 
-# ── COLOUR PALETTE ────────────────────────────────────────────────────────────
 C = {
     "bg": "#0D1117",
     "bg2": "#161B22",
@@ -77,15 +59,6 @@ C = {
     "purple": "#BC8CFF",
     "orange": "#FFA657",
     "teal": "#39D353",
-    "pink": "#FF7EB3",
-}
-
-CATEGORY_COLOR = {
-    "stable": C["green"],
-    "flaky-mild": C["amber"],
-    "flaky-moderate": C["orange"],
-    "flaky-heavy": C["red"],
-    "consistently_failing": "#C9304E",
 }
 
 FAILURE_COLOR = {
@@ -97,22 +70,13 @@ FAILURE_COLOR = {
     "unknown": C["muted"],
 }
 
-CATEGORY_LABEL = {
-    "stable": "Stable",
-    "flaky-mild": "Flaky · Mild",
-    "flaky-moderate": "Flaky · Moderate",
-    "flaky-heavy": "Flaky · Heavy",
-    "consistently_failing": "Consistently Failing",
-}
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
 def inject_css() -> None:
     st.markdown(
         f"""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,600;0,700;1,400&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
 
-    /* ── BASE ── */
     html, body, [class*="css"] {{
         font-family: 'IBM Plex Sans', sans-serif !important;
         background-color: {C["bg"]} !important;
@@ -127,12 +91,10 @@ def inject_css() -> None:
     .element-container {{ margin-bottom: 0 !important; }}
     a {{ color: {C["blue"]} !important; text-decoration: none; }}
 
-    /* ── SCROLLBAR ── */
     ::-webkit-scrollbar {{ width: 5px; height: 5px; }}
     ::-webkit-scrollbar-track {{ background: {C["bg"]}; }}
     ::-webkit-scrollbar-thumb {{ background: {C["border"]}; border-radius: 4px; }}
 
-    /* ── SIDEBAR ── */
     section[data-testid="stSidebar"] > div:first-child {{
         background-color: {C["bg2"]} !important;
         border-right: 1px solid {C["border"]} !important;
@@ -140,7 +102,6 @@ def inject_css() -> None:
     }}
     [data-testid="stSidebar"] * {{ color: {C["txt"]} !important; }}
 
-    /* ── SECTION HEADERS ── */
     .sec-wrap {{
         display: flex; align-items: center; gap: 10px;
         margin: 2.6rem 0 1.2rem;
@@ -162,7 +123,6 @@ def inject_css() -> None:
         flex-shrink: 0;
     }}
 
-    /* ── DASHBOARD HEADER ── */
     .dash-header {{
         background: linear-gradient(135deg, {C["bg2"]} 0%, {C["card"]} 100%);
         border: 1px solid {C["border"]}; border-radius: 14px;
@@ -186,7 +146,6 @@ def inject_css() -> None:
     }}
     .dash-right b {{ color: {C["txt"]}; font-weight: 600; }}
 
-    /* ── METRIC CARDS ── */
     .metric-card {{
         background: {C["card"]}; border: 1px solid {C["border"]};
         border-radius: 12px; padding: 1.4rem 1.6rem;
@@ -225,7 +184,6 @@ def inject_css() -> None:
     .badge-purple {{ background:{C["purple"]}18;color:{C["purple"]};border:1px solid {C["purple"]}44;}}
     .badge-orange {{ background:{C["orange"]}18;color:{C["orange"]};border:1px solid {C["orange"]}44;}}
 
-    /* ── DELTA CARDS ── */
     .delta-card {{
         background: {C["card"]}; border: 1px solid {C["border"]};
         border-radius: 12px; padding: 1.4rem 1.6rem; text-align: center;
@@ -239,7 +197,6 @@ def inject_css() -> None:
     }}
     .delta-lbl span {{ text-transform: none; letter-spacing: 0; font-weight: 400; }}
 
-    /* ── FAILURE TABLE ── */
     .fail-table {{
         width: 100%; border-collapse: collapse; font-size: 0.83rem;
         background: {C["card"]}; border: 1px solid {C["border"]};
@@ -264,7 +221,6 @@ def inject_css() -> None:
     .tkw   {{ font: 400 0.7rem/1 'JetBrains Mono', monospace; color: {C["muted"]}; }}
     .tdur  {{ font: 600 0.77rem/1 'JetBrains Mono', monospace; color: {C["txt"]}; white-space: nowrap; }}
 
-    /* ── BANNERS ── */
     .info-banner {{
         background: {C["blue"]}10; border: 1px solid {C["blue"]}30;
         border-radius: 8px; padding: .75rem 1.1rem;
@@ -278,7 +234,6 @@ def inject_css() -> None:
         color: {C["amber"]}; margin-bottom: 1rem;
     }}
 
-    /* ── FOOTER ── */
     .dash-footer {{
         margin-top: 3.5rem; padding: 1rem 0 .5rem;
         border-top: 1px solid {C["border"]}88;
@@ -286,7 +241,6 @@ def inject_css() -> None:
         display: flex; justify-content: space-between;
     }}
 
-    /* ── STREAMLIT WIDGET POLISH ── */
     div[data-testid="stSelectbox"] label {{
         font: 600 0.65rem/1 'JetBrains Mono', monospace !important;
         letter-spacing: .1em !important;
@@ -316,7 +270,7 @@ def inject_css() -> None:
     """,
         unsafe_allow_html=True,
     )
-# ── PLOTLY THEME ──────────────────────────────────────────────────────────────
+
 def dark_layout(height: int = 360, title: str = "", margin: dict | None = None) -> dict:
     m = margin or dict(l=10, r=20, t=40 if title else 10, b=10)
     return dict(
@@ -350,15 +304,13 @@ def dark_layout(height: int = 360, title: str = "", margin: dict | None = None) 
         ),
     )
 
-# ── DATABASE HELPERS ──────────────────────────────────────────────────────────
+
 def standardize_columns(df_runs, df_results):
     """Ensure required columns exist even if schema varies."""
-    # Runs
     if "pass_rate" in df_runs.columns and "pass_rate_pct" not in df_runs.columns:
         df_runs["pass_rate_pct"] = df_runs["pass_rate"]
     if "total_tests" in df_runs.columns and "total" not in df_runs.columns:
         df_runs["total"] = df_runs["total_tests"]
-    # Results
     if "duration" in df_results.columns and "duration_s" not in df_results.columns:
         df_results["duration_s"] = df_results["duration"]
     if "message" in df_results.columns and "failure_msg" not in df_results.columns:
@@ -374,19 +326,12 @@ def standardize_columns(df_runs, df_results):
     return df_runs, df_results
 
 def safe_sort_runs(df, by="timestamp", ascending=True):
-    """
-    Sort DataFrame robustly. Accepts a single column name or a list of column names.
-    Falls back to numeric extraction for run_id when sorting by run_id alone.
-    """
-    # Handle list of columns
+    """Sort a DataFrame by column, falling back gracefully. Handles run_id as numeric string."""
     if isinstance(by, list):
-        # For multi-column sort, we need to handle each column
         sort_cols = []
         ascending_list = ascending if isinstance(ascending, list) else [ascending] * len(by)
-        
         for i, col in enumerate(by):
             if col not in df.columns:
-                # Try fallbacks for each missing column
                 found = False
                 for fallback in ["timestamp", "run_id"]:
                     if fallback in df.columns and fallback not in [c for c, _ in sort_cols]:
@@ -396,27 +341,19 @@ def safe_sort_runs(df, by="timestamp", ascending=True):
                 if not found:
                     continue
             elif col == "run_id" and pd.api.types.is_object_dtype(df[col]):
-                # Create temporary numeric column for sorting
                 df = df.copy()
                 df["_run_num_temp"] = df["run_id"].str.extract(r'(\d+)$').astype(float)
                 sort_cols.append(("_run_num_temp", ascending_list[i]))
             else:
                 sort_cols.append((col, ascending_list[i]))
-        
         if not sort_cols:
             return df
-        
-        # Perform the multi-column sort
         cols, asc = zip(*sort_cols)
         df = df.sort_values(by=list(cols), ascending=list(asc))
-        
-        # Drop any temporary columns
         if "_run_num_temp" in df.columns:
             df = df.drop(columns=["_run_num_temp"])
-        
         return df
-    
-    # Single column sort (original logic)
+
     if by not in df.columns:
         for fallback in ["timestamp", "run_id", "count"]:
             if fallback in df.columns:
@@ -424,16 +361,13 @@ def safe_sort_runs(df, by="timestamp", ascending=True):
                 break
         else:
             return df
-    
     if by == "run_id" and pd.api.types.is_object_dtype(df[by]):
         df = df.copy()
         df["_run_num"] = df["run_id"].str.extract(r'(\d+)$').astype(float)
         df = df.sort_values("_run_num", ascending=ascending).drop(columns=["_run_num"])
         return df
-    
     return df.sort_values(by, ascending=ascending)
 
-# Attach as method
 pd.DataFrame.safe_sort_runs = lambda self, *args, **kwargs: safe_sort_runs(self, *args, **kwargs)
 
 @st.cache_resource
@@ -483,7 +417,6 @@ def _fallback_single_read(db_path: str):
     return df_runs, df_results
 
 def _build_demo_data():
-    """Synthetic data matching schema.sql."""
     rng = random.Random(42)
     TESTS_DEMO = [
         ("TC_Login_ValidCredentials", "feature_login", "priority_high", "stable", 0.00),
@@ -614,7 +547,7 @@ def filter_by_source(df: pd.DataFrame, source: Optional[str]) -> pd.DataFrame:
         return df[df["_source_db"] == source].copy()
     return df.copy()
 
-# ── DATA FETCHERS ─────────────────────────────────────────────────────────────
+
 def compute_anomalies(df_runs: pd.DataFrame) -> pd.DataFrame:
     df = df_runs.copy().safe_sort_runs("run_id").reset_index(drop=True)
     roll = df["pass_rate_pct"].rolling(window=ROLLING_WINDOW, min_periods=3)
@@ -646,8 +579,7 @@ def get_failures_for_run(df_results: pd.DataFrame, run_id: str) -> pd.DataFrame:
     return df.safe_sort_runs("test_name")
 
 def compute_flaky_from_results(df_results: pd.DataFrame) -> pd.DataFrame:
-    """Compute per-test flip count + failure rate from the canonical df_results."""
-    # Use native pandas sort_values instead of custom method for multi-column sort
+    """Compute per-test flip count and failure rate from df_results."""
     df = df_results.sort_values(["_source_db", "test_name", "run_timestamp"]).copy()
     df["prev_status"] = df.groupby(["_source_db", "test_name"])["status"].shift(1)
     df["flip"] = (df["status"] != df["prev_status"]) & df["prev_status"].notna()
@@ -672,7 +604,6 @@ def get_duration_series(df_results: pd.DataFrame, test_name: str) -> pd.DataFram
     return df
 
 def compute_week_on_week(df_runs: pd.DataFrame, df_results: pd.DataFrame, selected_week: int) -> dict:
-    """Week-over-week using build numbers, not index slicing."""
     df = df_runs.copy()
     df["build_num"] = df["run_id"].str.extract(r"(\d+)$").astype(float)
     df = df.sort_values("build_num").reset_index(drop=True)
@@ -715,7 +646,7 @@ def compute_week_on_week(df_runs: pd.DataFrame, df_results: pd.DataFrame, select
         tests_fixed=tests_fixed,
     )
 
-# ── CHART BUILDERS ────────────────────────────────────────────────────────────
+
 def chart_trend(df_runs: pd.DataFrame, show_n: int) -> go.Figure:
     df = compute_anomalies(df_runs)
     display_df = df.tail(show_n).copy()
@@ -1073,7 +1004,7 @@ def chart_sankey(df_results: pd.DataFrame, phase_filter: str = "All phases") -> 
         )
     return fig
 
-# ── UI HELPERS ────────────────────────────────────────────────────────────────
+
 def _badge(text, kind):
     return f'<span class="mc-badge badge-{kind}">{text}</span>'
 
@@ -1088,7 +1019,7 @@ def _section(tag, title, sub=""):
         unsafe_allow_html=True,
     )
 
-# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+
 def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[str]):
     with st.sidebar:
         st.markdown(
@@ -1101,17 +1032,12 @@ def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[
             st.cache_data.clear()
             st.rerun()
 
-        # Database filter
         selected_source = "All"
         if len(db_sources) > 1:
-            st.markdown(
-                f'<div class=\"sb-label\">Database Source</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<div class="sb-label">Database Source</div>', unsafe_allow_html=True)
             selected_source = st.selectbox("Filter by database", options=["All"] + db_sources)
         st.markdown("---")
 
-        # Week selector (used for both Weekly Health and Trend)
         total_runs = len(df_runs)
         max_weeks = max(1, total_runs // 7)
         selected_week = st.selectbox(
@@ -1123,11 +1049,17 @@ def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[
         )
         st.markdown("---")
 
-        # Run Inspector
         st.markdown(
-            f'<div class=\"sb-label\">Run Inspector</div>',
+            f'<div style="font:600 0.65rem/1 \'JetBrains Mono\',monospace; letter-spacing:.1em; text-transform:uppercase; color:{C["muted"]}; margin-bottom:.6rem;">Visible Sections</div>',
             unsafe_allow_html=True,
         )
+        show_trend = st.checkbox("Trend · Historical Pass Rate", value = False)
+        show_run_inspector = st.checkbox("Run Inspector", value=False)
+        show_duration_drift = st.checkbox("Duration Drift", value=False)
+        show_health_matrix = st.checkbox("Test Health Matrix", value=False)
+        st.markdown("---")
+
+        st.markdown(f'<div class="sb-label">Run Inspector</div>', unsafe_allow_html=True)
         run_ids_sorted = df_runs.safe_sort_runs("timestamp", ascending=False)["run_id"].tolist()
         run_labels = [
             f"{rid} ({str(df_runs[df_runs['run_id']==rid]['timestamp'].values[0])[:10]} {df_runs[df_runs['run_id']==rid]['pass_rate_pct'].values[0]:.1f}%)"
@@ -1139,19 +1071,11 @@ def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[
         selected_run_id = run_ids_sorted[sel_idx] if run_ids_sorted else None
         st.markdown("---")
 
-        # Duration Drift
-        st.markdown(
-            f'<div class=\"sb-label\">Duration Drift</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f'<div class="sb-label">Duration Drift</div>', unsafe_allow_html=True)
         drift_test = st.selectbox("Test to analyze", DURATION_TESTS, index=0)
         st.markdown("---")
 
-        # Database info
-        st.markdown(
-            f'<div class=\"sb-label\">Database(s)</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f'<div class="sb-label">Database(s)</div>', unsafe_allow_html=True)
         for p in db_paths:
             st.code(p, language=None)
         st.markdown(
@@ -1161,16 +1085,15 @@ def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[
             unsafe_allow_html=True,
         )
 
-    return selected_source, selected_week, selected_run_id, drift_test
+    return selected_source, selected_week, selected_run_id, drift_test, show_trend, show_run_inspector, show_duration_drift, show_health_matrix
 
-# ── SECTION RENDERERS ─────────────────────────────────────────────────────────
+
 def render_header(df_runs: pd.DataFrame) -> None:
     if df_runs.empty:
         return
     latest = df_runs.safe_sort_runs("run_id").iloc[-1]
     ts_str = str(latest.get("timestamp", ""))[:16].replace("T", " ")
     
-    # Extract all unique programs from suite_name
     suite_names = df_runs["suite_name"].unique()
     programs = []
     for sn in suite_names:
@@ -1183,11 +1106,7 @@ def render_header(df_runs: pd.DataFrame) -> None:
             programs.append(("GAMMA", C["orange"], "🅲"))
     if not programs:
         programs = [(suite_names[0].upper(), C["muted"], "❓")]
-    
-    # Sort programs for consistent display (optional)
     programs.sort(key=lambda x: x[0])
-    
-    # Build program badges HTML
     program_badges = " ".join([
         f'<span style="background:{color}15; color:{color}; padding:0.3rem 0.8rem; '
         f'border-radius:6px; margin-right:0.5rem; font:700 1rem/1 \'JetBrains Mono\',monospace; '
@@ -1217,7 +1136,6 @@ def render_weekly_health(df_runs: pd.DataFrame, df_results: pd.DataFrame, select
         st.markdown('<div class="info-banner">No data loaded.</div>', unsafe_allow_html=True)
         return
 
-    # Current week metrics
     df = df_runs.copy()
     df["build_num"] = df["run_id"].str.extract(r"(\d+)$").astype(float)
     df = df.sort_values("build_num")
@@ -1247,7 +1165,6 @@ def render_weekly_health(df_runs: pd.DataFrame, df_results: pd.DataFrame, select
     best_recent = df_week["pass_rate_pct"].max()
     worst_recent = df_week["pass_rate_pct"].min()
 
-    # Week-over-week deltas
     wow = compute_week_on_week(df_runs, df_results, selected_week)
     delta_pr = wow["pass_rate_delta"]
     if delta_pr >= 2:
@@ -1258,7 +1175,6 @@ def render_weekly_health(df_runs: pd.DataFrame, df_results: pd.DataFrame, select
         pr_color, pr_arrow = C["muted"], "—"
     sign = "+" if delta_pr > 0 else ""
 
-    # Layout: Current metrics + 3 delta cards
     c1, c2, c3, c4 = st.columns([2.2, 1.4, 1.4, 1.4])
     with c1:
         st.markdown(
@@ -1300,7 +1216,6 @@ def render_weekly_health(df_runs: pd.DataFrame, df_results: pd.DataFrame, select
             unsafe_allow_html=True,
         )
 
-    # Delta cards row
     st.markdown('<div style="margin-top:1.8rem;"></div>', unsafe_allow_html=True)
     d1, d2, d3 = st.columns(3)
     with d1:
@@ -1334,6 +1249,11 @@ def render_weekly_health(df_runs: pd.DataFrame, df_results: pd.DataFrame, select
             f'</div>',
             unsafe_allow_html=True,
         )
+    st.markdown(
+        f'<div style="font:400 0.76rem/1.6 \'JetBrains Mono\',monospace; color:{C["muted"]}; margin-top:1rem;">'
+        f'Metrics reflect the latest run in week {selected_week}. Delta cards compare against the previous 7-run window.</div>',
+        unsafe_allow_html=True,
+    )
 
 def render_trend(df_runs: pd.DataFrame) -> None:
     df_anom = compute_anomalies(df_runs)
@@ -1342,6 +1262,12 @@ def render_trend(df_runs: pd.DataFrame) -> None:
     _section("TREND", "Historical Pass Rate", f"Full history · {len(df_runs)} runs · {anom_lbl}")
     fig = chart_trend(df_runs, show_n=100)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.markdown(
+        f'<div style="font:400 0.76rem/1.6 \'JetBrains Mono\',monospace; color:{C["muted"]}; margin-top:.2rem;">'
+        f'Pass rate over all runs. Red markers (⚠) flag statistical anomalies where the drop exceeds {ANOMALY_SIGMA}σ of the rolling mean. '
+        f'Green zone ≥ {GREEN_THRESHOLD:.0f}% · amber zone ≥ {AMBER_THRESHOLD:.0f}%.</div>',
+        unsafe_allow_html=True,
+    )
 
 def render_run_inspector(df_results: pd.DataFrame, run_id: Optional[str]) -> None:
     if not run_id:
@@ -1397,7 +1323,6 @@ def render_run_inspector(df_results: pd.DataFrame, run_id: Optional[str]) -> Non
             if fig_donut:
                 st.plotly_chart(fig_donut, use_container_width=True, config={"displayModeBar": False})
 
-    # Sankey Flow (placed directly under run inspector)
     st.markdown('<div style="margin-top:2rem; padding-top:1.5rem; border-top:1px solid ' + C["border"] + '; font:700 1.05rem/1 \'IBM Plex Sans\',sans-serif; color:' + C["txt"] + '; display:flex; align-items:center; gap:8px; margin-bottom:1rem;"><span style="background:' + C["blue"] + '18; color:' + C["blue"] + '; font:700 0.62rem/1 \'JetBrains Mono\',monospace; letter-spacing:.14em; text-transform:uppercase; padding:4px 10px; border-radius:5px; border:1px solid ' + C["blue"] + '33;">FAILURE FLOW</span> Sankey Diagram</div>', unsafe_allow_html=True)
     phase_filter = st.selectbox(
         "Filter by phase",
@@ -1406,6 +1331,11 @@ def render_run_inspector(df_results: pd.DataFrame, run_id: Optional[str]) -> Non
     )
     fig_sankey = chart_sankey(df_results, phase_filter)
     st.plotly_chart(fig_sankey, use_container_width=True, config={"displayModeBar": False})
+    st.markdown(
+        f'<div style="font:400 0.76rem/1.6 \'JetBrains Mono\',monospace; color:{C["muted"]}; margin-top:.2rem;">'
+        f'Flows left-to-right: failure category → affected test → run phase where the failure occurred.</div>',
+        unsafe_allow_html=True,
+    )
 
 def render_duration_drift(df_results: pd.DataFrame, drift_test: str, selected_source: str) -> None:
     _section("DURATION DRIFT", f"{drift_test.replace('TC_','')}", "Execution time evolution")
@@ -1437,8 +1367,12 @@ def render_test_health_matrix(df_results: pd.DataFrame, selected_source: str) ->
     )
     fig_heat = chart_heatmap(df_results, selected_source if selected_source != "All" else None)
     st.plotly_chart(fig_heat, use_container_width=True, config={"displayModeBar": False})
+    st.markdown(
+        f'<div style="font:400 0.76rem/1.6 \'JetBrains Mono\',monospace; color:{C["muted"]}; margin-top:.2rem;">'
+        f'Each cell shows pass (green) or fail (red) for a test × run pair. Speckled rows are flaky; solid red rows are consistently failing.</div>',
+        unsafe_allow_html=True,
+    )
 
-    # Stability Spectrum
     all_flaky = compute_flaky_from_results(df_results)
     flaky_df = all_flaky[all_flaky["failure_rate"] >= 25.0].sort_values("failure_rate", ascending=False)
     if not flaky_df.empty:
@@ -1482,7 +1416,7 @@ def render_footer(db_paths: list[str], df_runs: pd.DataFrame) -> None:
         unsafe_allow_html=True,
     )
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+
 def _parse_db_paths() -> list[str]:
     paths = []
     args = sys.argv[1:]
@@ -1513,13 +1447,11 @@ def main() -> None:
         st.stop()
 
     db_sources = sorted(df_runs["_source_db"].unique().tolist()) if "_source_db" in df_runs.columns else ["unknown"]
-    selected_source, selected_week, selected_run_id, drift_test = render_sidebar(df_runs, db_paths, db_sources)
+    selected_source, selected_week, selected_run_id, drift_test, show_trend, show_run_inspector, show_duration_drift, show_health_matrix = render_sidebar(df_runs, db_paths, db_sources)
 
-    # Apply source filter
     df_runs_f = filter_by_source(df_runs, selected_source)
     df_results_f = filter_by_source(df_results, selected_source)
 
-    # Clamp week to filtered data
     total_runs_f = len(df_runs_f)
     max_weeks_f = max(1, total_runs_f // 7)
     if selected_week > max_weeks_f:
@@ -1527,10 +1459,14 @@ def main() -> None:
 
     render_header(df_runs_f)
     render_weekly_health(df_runs_f, df_results_f, selected_week)
-    render_trend(df_runs_f)
-    render_run_inspector(df_results_f, selected_run_id)
-    render_duration_drift(df_results_f, drift_test, selected_source)
-    render_test_health_matrix(df_results_f, selected_source)
+    if show_trend:
+        render_trend(df_runs_f)
+    if show_run_inspector:
+        render_run_inspector(df_results_f, selected_run_id)
+    if show_duration_drift:
+        render_duration_drift(df_results_f, drift_test, selected_source)
+    if show_health_matrix:
+        render_test_health_matrix(df_results_f, selected_source)
     render_footer(db_paths, df_runs_f)
 
 if __name__ == "__main__":
