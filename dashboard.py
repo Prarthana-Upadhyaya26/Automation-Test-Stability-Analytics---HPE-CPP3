@@ -9,22 +9,69 @@ Usage:
   streamlit run dashboard.py -- --db ./analytics.db ./teambravo.db
 """
 
+import json
+import os
 import random
 import sqlite3
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 try:
-    from pipeline2 import load_multi_db
+    from pipeline import (
+        load_multi_db,
+        load_defect_mappings,
+        load_jira_defects_df,
+        get_defect_coverage_stats,
+        ingest_jira_defects,
+        load_jira_defects_from_list,
+        map_defects_to_test_results,
+        create_database,
+        compute_and_cache_embeddings,
+        DEFECT_WINDOW_DAYS,
+        DEFECT_MIN_CONFIDENCE,
+        DEFAULT_EMBED_MODEL,
+        _ALPHA_RULE,
+        _BETA_SEMANTIC,
+    )
     PIPELINE2_AVAILABLE = True
 except ImportError:
-    PIPELINE2_AVAILABLE = False
+    try:
+        from pipeline import load_multi_db
+        PIPELINE2_AVAILABLE = True
+        load_defect_mappings          = None  # type: ignore[assignment]
+        load_jira_defects_df          = None  # type: ignore[assignment]
+        get_defect_coverage_stats     = None  # type: ignore[assignment]
+        ingest_jira_defects           = None  # type: ignore[assignment]
+        load_jira_defects_from_list   = None  # type: ignore[assignment]
+        map_defects_to_test_results   = None  # type: ignore[assignment]
+        create_database               = None  # type: ignore[assignment]
+        compute_and_cache_embeddings  = None  # type: ignore[assignment]
+        DEFECT_WINDOW_DAYS            = 7
+        DEFECT_MIN_CONFIDENCE         = 0.25
+        DEFAULT_EMBED_MODEL           = "BAAI/bge-small-en-v1.5"
+        _ALPHA_RULE                   = 1.0
+        _BETA_SEMANTIC                = 0.0
+    except ImportError:
+        PIPELINE2_AVAILABLE           = False
+        load_defect_mappings          = None  # type: ignore[assignment]
+        load_jira_defects_df          = None  # type: ignore[assignment]
+        get_defect_coverage_stats     = None  # type: ignore[assignment]
+        ingest_jira_defects           = None  # type: ignore[assignment]
+        load_jira_defects_from_list   = None  # type: ignore[assignment]
+        map_defects_to_test_results   = None  # type: ignore[assignment]
+        create_database               = None  # type: ignore[assignment]
+        compute_and_cache_embeddings  = None  # type: ignore[assignment]
+        DEFECT_WINDOW_DAYS            = 7
+        DEFECT_MIN_CONFIDENCE         = 0.25
+        DEFAULT_EMBED_MODEL           = "BAAI/bge-small-en-v1.5"
+        _ALPHA_RULE                   = 1.0
+        _BETA_SEMANTIC                = 0.0
 
 st.set_page_config(
     page_title="Test Stability Analytics",
@@ -241,6 +288,94 @@ def inject_css() -> None:
         display: flex; justify-content: space-between;
     }}
 
+    /* ── Defect Mapping tab ───────────────────────────────────── */
+    .defect-card {{
+        background: {C["card"]}; border: 1px solid {C["border"]};
+        border-radius: 12px; padding: 1.2rem 1.4rem; margin-bottom: .8rem;
+        position: relative; overflow: hidden;
+    }}
+    .defect-card::before {{
+        content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+        width: 3px; border-radius: 12px 0 0 12px;
+    }}
+    .defect-confirmed::before  {{ background: {C["green"]}; }}
+    .defect-candidate::before  {{ background: {C["amber"]}; }}
+    .defect-unmatched::before  {{ background: {C["muted"]}; }}
+    .defect-key {{
+        font: 700 0.78rem/1 'JetBrains Mono', monospace;
+        color: {C["blue"]}; letter-spacing: .05em;
+    }}
+    .defect-summary {{
+        font: 500 0.85rem/1.4 'IBM Plex Sans', sans-serif;
+        color: {C["txt"]}; margin: .35rem 0 .5rem;
+    }}
+    .defect-meta {{
+        font: 400 0.71rem/1.6 'JetBrains Mono', monospace;
+        color: {C["muted"]};
+    }}
+    .defect-meta b {{ color: {C["txt"]}; font-weight: 600; }}
+    .conf-bar-wrap {{
+        height: 5px; background: {C["border"]}44;
+        border-radius: 3px; margin: .5rem 0 .3rem; overflow: hidden;
+    }}
+    .conf-bar {{
+        height: 100%; border-radius: 3px;
+        transition: width .3s ease;
+    }}
+    .conf-label {{
+        font: 600 0.66rem/1 'JetBrains Mono', monospace;
+        letter-spacing: .1em; text-transform: uppercase;
+    }}
+    .reason-tag {{
+        display: inline-block; padding: 2px 8px; border-radius: 4px; margin: 2px 3px 2px 0;
+        font: 400 0.68rem/1.5 'JetBrains Mono', monospace;
+        background: {C["blue"]}14; color: {C["blue"]};
+        border: 1px solid {C["blue"]}28;
+    }}
+    .defect-table {{
+        width: 100%; border-collapse: collapse; font-size: 0.82rem;
+        background: {C["card"]}; border: 1px solid {C["border"]};
+        border-radius: 12px; overflow: hidden;
+    }}
+    .defect-table th {{
+        background: {C["bg2"]}; color: {C["muted"]};
+        font: 600 0.63rem/1 'JetBrains Mono', monospace;
+        letter-spacing: .12em; text-transform: uppercase;
+        padding: 10px 14px; text-align: left;
+        border-bottom: 1px solid {C["border"]}; white-space: nowrap;
+    }}
+    .defect-table td {{
+        padding: 10px 14px; border-bottom: 1px solid {C["border"]}44;
+        vertical-align: middle; line-height: 1.45;
+    }}
+    .defect-table tr:last-child td {{ border-bottom: none; }}
+    .defect-table tr:hover td {{ background: {C["bg2"]}aa; }}
+    .status-pill {{
+        display: inline-flex; align-items: center;
+        padding: 2px 10px; border-radius: 12px;
+        font: 600 0.66rem/1.6 'JetBrains Mono', monospace;
+        white-space: nowrap;
+    }}
+    .status-triage    {{ background:{C["amber"]}18; color:{C["amber"]}; border:1px solid {C["amber"]}33; }}
+    .status-inprogress{{ background:{C["blue"]}18;  color:{C["blue"]};  border:1px solid {C["blue"]}33;  }}
+    .status-labreview {{ background:{C["purple"]}18;color:{C["purple"]};border:1px solid {C["purple"]}33;}}
+    .status-closed    {{ background:{C["green"]}18; color:{C["green"]}; border:1px solid {C["green"]}33; }}
+    .status-other     {{ background:{C["muted"]}18; color:{C["muted"]}; border:1px solid {C["muted"]}33; }}
+    .proj-tag {{
+        display: inline-flex; align-items: center;
+        padding: 2px 9px; border-radius: 5px;
+        font: 700 0.64rem/1.6 'JetBrains Mono', monospace;
+        background: {C["purple"]}14; color: {C["purple"]};
+        border: 1px solid {C["purple"]}28; white-space: nowrap;
+    }}
+    .multi-badge {{
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 8px; border-radius: 5px;
+        font: 600 0.64rem/1.6 'JetBrains Mono', monospace;
+        background: {C["orange"]}14; color: {C["orange"]};
+        border: 1px solid {C["orange"]}28;
+    }}
+
     div[data-testid="stSelectbox"] label {{
         font: 600 0.65rem/1 'JetBrains Mono', monospace !important;
         letter-spacing: .1em !important;
@@ -368,7 +503,7 @@ def safe_sort_runs(df, by="timestamp", ascending=True):
         return df
     return df.sort_values(by, ascending=ascending)
 
-pd.DataFrame.safe_sort_runs = lambda self, *args, **kwargs: safe_sort_runs(self, *args, **kwargs)
+setattr(pd.DataFrame, "safe_sort_runs", lambda self, *args, **kwargs: safe_sort_runs(self, *args, **kwargs))
 
 @st.cache_resource
 def get_db_data(db_paths_key: str):
@@ -465,7 +600,7 @@ def _build_demo_data():
         else:
             rows2 = rng.choice([0, 1, 2])
             mins  = rng.choice([50, 100, 200])
-            rng2  = rng.choice(["Oct 2024", "last 30 days", "Q4 2024"])
+            rng2  = rng.choice(["Oct 2026", "last 30 days", "Q4 2026"])
             return f"CSV export contained {rows2} rows — expected at least {mins} records for {rng2}", "Verify Row Count"
     def _dur(name, n, status):
         if name == "TC_User_BulkImport":
@@ -481,7 +616,7 @@ def _build_demo_data():
         return round(base, 3)
     ANOMALY_RUNS = {36, 37}
     ANOMALY_FAIL_RATE = 0.80
-    start_dt = datetime(2024, 10, 1)
+    start_dt = datetime(2026, 10, 1)
     runs_rows = []
     results_rows = []
     for n in range(1, 101):
@@ -549,7 +684,7 @@ def filter_by_source(df: pd.DataFrame, source: Optional[str]) -> pd.DataFrame:
 
 
 def compute_anomalies(df_runs: pd.DataFrame) -> pd.DataFrame:
-    df = df_runs.copy().safe_sort_runs("run_id").reset_index(drop=True)
+    df = safe_sort_runs(df_runs.copy(), "run_id").reset_index(drop=True)
     roll = df["pass_rate_pct"].rolling(window=ROLLING_WINDOW, min_periods=3)
     df["roll_mean"] = roll.mean().shift(1)
     df["roll_std"] = roll.std().shift(1).fillna(5.0)
@@ -576,7 +711,7 @@ def get_failures_for_run(df_results: pd.DataFrame, run_id: str) -> pd.DataFrame:
         return "unknown"
     df["failure_category"] = df["failure_msg"].apply(classify)
     df["keyword_name"] = df["failure_kw"].fillna("—")
-    return df.safe_sort_runs("test_name")
+    return safe_sort_runs(df, "test_name")
 
 def compute_flaky_from_results(df_results: pd.DataFrame) -> pd.DataFrame:
     """Compute per-test flip count and failure rate from df_results."""
@@ -599,7 +734,7 @@ def compute_flaky_from_results(df_results: pd.DataFrame) -> pd.DataFrame:
 
 def get_duration_series(df_results: pd.DataFrame, test_name: str) -> pd.DataFrame:
     df = df_results[df_results["test_name"] == test_name].copy()
-    df = df.safe_sort_runs("run_timestamp").reset_index(drop=True)
+    df = safe_sort_runs(df, "run_timestamp").reset_index(drop=True)
     df["run_num"] = range(1, len(df) + 1)
     return df
 
@@ -788,7 +923,7 @@ def chart_heatmap(df_results: pd.DataFrame, source_db: Optional[str] = None) -> 
     run_order = (
         df[["run_id", "run_timestamp"]]
         .drop_duplicates()
-        .safe_sort_runs("run_timestamp")["run_id"]
+        .sort_values("run_timestamp")["run_id"]
         .tolist()
     )
     df["pass_int"] = (df["status"] == "PASS").astype(int)
@@ -1057,10 +1192,18 @@ def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[
         show_run_inspector = st.checkbox("Run Inspector", value=False)
         show_duration_drift = st.checkbox("Duration Drift", value=False)
         show_health_matrix = st.checkbox("Test Health Matrix", value=False)
+        show_defect_mapping = st.checkbox("Defect Mapping", value=False)
         st.markdown("---")
 
         st.markdown(f'<div class="sb-label">Run Inspector</div>', unsafe_allow_html=True)
-        run_ids_sorted = df_runs.safe_sort_runs("timestamp", ascending=False)["run_id"].tolist()
+        # safe_sort_runs may be masked by a dataframe column with the same name
+        sorter = getattr(df_runs, "safe_sort_runs", None)
+        if callable(sorter):
+            sorted_df = cast(pd.DataFrame, sorter("timestamp", ascending=False))
+        else:
+            # fallback to pandas sort_values
+            sorted_df = cast(pd.DataFrame, df_runs.sort_values("timestamp", ascending=False))
+        run_ids_sorted = sorted_df["run_id"].tolist()
         run_labels = [
             f"{rid} ({str(df_runs[df_runs['run_id']==rid]['timestamp'].values[0])[:10]} {df_runs[df_runs['run_id']==rid]['pass_rate_pct'].values[0]:.1f}%)"
             for rid in run_ids_sorted
@@ -1085,13 +1228,18 @@ def render_sidebar(df_runs: pd.DataFrame, db_paths: list[str], db_sources: list[
             unsafe_allow_html=True,
         )
 
-    return selected_source, selected_week, selected_run_id, drift_test, show_trend, show_run_inspector, show_duration_drift, show_health_matrix
+    return selected_source, selected_week, selected_run_id, drift_test, show_trend, show_run_inspector, show_duration_drift, show_health_matrix, show_defect_mapping
 
 
 def render_header(df_runs: pd.DataFrame) -> None:
     if df_runs.empty:
         return
-    latest = df_runs.safe_sort_runs("run_id").iloc[-1]
+    sorter = getattr(df_runs, "safe_sort_runs", None)
+    if callable(sorter):
+        latest_df = cast(pd.DataFrame, sorter("run_id"))
+    else:
+        latest_df = cast(pd.DataFrame, df_runs.sort_values("run_id"))
+    latest = latest_df.iloc[-1]
     ts_str = str(latest.get("timestamp", ""))[:16].replace("T", " ")
     
     suite_names = df_runs["suite_name"].unique()
@@ -1405,12 +1553,917 @@ def render_test_health_matrix(df_results: pd.DataFrame, selected_source: str) ->
                     unsafe_allow_html=True,
                 )
 
+def _get_cached_db_conn(db_path: str) -> Optional[sqlite3.Connection]:
+    """
+    Open and cache a SQLite connection for the given path.
+
+    Decorated with @st.cache_resource so Streamlit creates exactly one
+    connection per db_path per process lifetime, reusing it across every
+    script rerun.  This avoids the leak pattern of opening a new connection
+    on every Streamlit interaction.
+
+    WAL mode is set here (in addition to pipeline.py's create_database) so
+    that dashboard-only deployments — where the DB was created externally —
+    also benefit from concurrent read/write access.
+
+    Thread safety
+    ─────────────
+    sqlite3 connections are not thread-safe by default.  Streamlit runs each
+    session in its own thread.  We pass check_same_thread=False because:
+      (a) The dashboard is read-only from this connection.
+      (b) WAL mode means readers never block writers and vice-versa.
+      (c) Python's GIL prevents true concurrent C-level sqlite3 calls.
+    For write operations triggered from the dashboard (ingest, map, writeback),
+    a *separate* short-lived connection is opened, used, and closed within the
+    button handler — never shared across threads.
+    """
+    if not Path(db_path).exists():
+        return None
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout  = 10000")
+    conn.execute("PRAGMA foreign_keys  = ON")
+    conn.execute("PRAGMA synchronous   = NORMAL")
+    conn.execute("PRAGMA cache_size    = -32768")
+    return conn
+
+
+def _open_db_conn(db_paths: list[str]) -> Optional[sqlite3.Connection]:
+    """
+    Return a cached read connection for the first existing DB path.
+
+    All reads in render_defect_mapping go through this.  The connection is
+    cached by @st.cache_resource on _get_cached_db_conn — only the first
+    call for each path actually opens a file descriptor.
+
+    For write operations (ingest, map, writeback) use _open_write_conn()
+    which returns a fresh, uncached connection that the caller must close.
+    """
+    for p in db_paths:
+        conn = _get_cached_db_conn(p)
+        if conn is not None:
+            return conn
+    return None
+
+
+def _open_write_conn(db_paths: list[str]) -> Optional[sqlite3.Connection]:
+    """
+    Open a fresh, uncached write connection for button-handler mutations.
+
+    Never reuse the cached read connection for writes — SQLite allows one
+    writer at a time and holding the write lock on the shared cached
+    connection would block all dashboard reads until the write completes.
+
+    Caller is responsible for calling conn.close() after the write is done.
+    """
+    for p in db_paths:
+        if Path(p).exists():
+            conn = sqlite3.connect(p, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA busy_timeout  = 10000")
+            conn.execute("PRAGMA foreign_keys  = ON")
+            conn.execute("PRAGMA synchronous   = NORMAL")
+            return conn
+    return None
+
+
+def _status_pill(status: str) -> str:
+    s = (status or "").lower().replace(" ", "").replace("-", "")
+    if s == "triage":
+        css = "status-triage"
+    elif s in ("inprogress", "development", "testing"):
+        css = "status-inprogress"
+    elif s == "labreview":
+        css = "status-labreview"
+    elif s.startswith("closed"):
+        css = "status-closed"
+    else:
+        css = "status-other"
+    return f'<span class="status-pill {css}">{status or "—"}</span>'
+
+
+def _proj_tag(project: str) -> str:
+    return f'<span class="proj-tag">{project or "—"}</span>'
+
+
+def _conf_color(score: float) -> str:
+    if score >= 0.75:
+        return C["green"]
+    elif score >= 0.5:
+        return C["blue"]
+    elif score >= 0.25:
+        return C["amber"]
+    return C["muted"]
+
+
+def _conf_bar(score: float) -> str:
+    color = _conf_color(score)
+    pct   = int(score * 100)
+    label_color = color
+    return (
+        f'<div class="conf-bar-wrap">'
+        f'  <div class="conf-bar" style="width:{pct}%; background:{color};"></div>'
+        f'</div>'
+        f'<span class="conf-label" style="color:{label_color};">{score:.2f}</span>'
+    )
+
+
+def _reason_tags(reason: str) -> str:
+    parts = [r.strip() for r in reason.split(";") if r.strip()]
+    return " ".join(f'<span class="reason-tag">{p}</span>' for p in parts)
+
+
+def _parse_labels(labels_json: str) -> list[str]:
+    try:
+        return json.loads(labels_json or "[]")
+    except Exception:
+        return []
+
+
+def render_defect_mapping(db_paths: list[str]) -> None:
+    """Render the full Defect Mapping tab."""
+
+    _section(
+        "DEFECT MAPPING",
+        "Automation Failures → Jira Defects",
+        "Reporter match · 7-day window · confidence scoring",
+    )
+
+    # ── Capability check ─────────────────────────────────────────────────────
+    if load_defect_mappings is None:
+        st.markdown(
+            f'<div class="warn-banner">⚠  pipeline.py not importable — '
+            f'defect mapping functions unavailable. '
+            f'Ensure <code>pipeline.py</code> is in the same directory as dashboard.py.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    conn = _open_db_conn(db_paths)
+    if conn is None:
+        st.markdown(
+            f'<div class="warn-banner">⚠  No database found at: {", ".join(db_paths)}<br>'
+            f'Run <code>python pipeline.py</code> to ingest CI run data first.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # ── Check whether mapping tables exist ───────────────────────────────────
+    tables = {
+        r[0] for r in
+        conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    has_defects  = "jira_defects"         in tables
+    has_mappings = "defect_test_mappings" in tables
+
+    if not has_defects or not has_mappings:
+        st.markdown(
+            f'<div class="warn-banner">⚠  Defect tables not found in the database.<br>'
+            f'The database schema may be from an older version. '
+            f'Re-run <code>python pipeline.py</code> with the updated <code>schema.sql</code> '
+            f'to create the <code>jira_defects</code> and <code>defect_test_mappings</code> tables.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    if load_jira_defects_df is None or get_defect_coverage_stats is None:
+        st.markdown(
+            f'<div class="warn-banner">⚠  Defect data helpers are unavailable. '
+            f'Ensure <code>pipeline.py</code> is importable and up to date.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # ── Load data ─────────────────────────────────────────────────────────────
+    df_defects  = load_jira_defects_df(conn)
+    df_mappings = load_defect_mappings(conn)
+    cov         = get_defect_coverage_stats(conn)
+
+    # ── KPI cards ─────────────────────────────────────────────────────────────
+    k1, k2, k3, k4, k5 = st.columns(5)
+    kpi_data = [
+        (k1, "TOTAL DEFECTS",       cov["total_defects"],        "blue",   f"{cov['total_defects']} Jira issues ingested"),
+        (k2, "CONFIRMED MAPPINGS",  cov["confirmed_mappings"],   "green",  "Email ✓ + Date ✓ + Score ≥ 0.5"),
+        (k3, "TESTS COVERED",       cov["unique_tests_covered"], "purple", "Unique failing tests linked"),
+        (k4, "FAILURE COVERAGE",    f"{cov['coverage_pct']:.1f}%", "amber", "% of FAIL rows with a mapped defect"),
+        (k5, "AVG CONFIDENCE",      f"{cov['avg_confidence']:.2f}", "blue", "Mean match confidence (0–1)"),
+    ]
+    for col, label, value, color, sub in kpi_data:
+        with col:
+            st.markdown(
+                f'<div class="metric-card mc-{color}">'
+                f'  <div class="mc-label">{label}</div>'
+                f'  <div class="mc-value {color}">{value}</div>'
+                f'  <div class="mc-sub">{sub}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('<div style="margin-top:1.6rem;"></div>', unsafe_allow_html=True)
+
+    # ── Scoring methodology explainer ─────────────────────────────────────────
+    with st.expander("ℹ  How the hybrid scoring works", expanded=False):
+        alpha_pct = int(_ALPHA_RULE * 100)
+        beta_pct  = int(_BETA_SEMANTIC * 100)
+        st.markdown(
+            f"""
+<div class="defect-meta" style="line-height:1.9;">
+
+<b style="color:{C['txt']}; font-size:0.85rem;">Two-stage hybrid pipeline</b><br>
+
+<b>Stage 1 — Gate checks</b> (must both pass for <span style="color:{C['green']};">confirmed = ✓</span>)<br>
+&nbsp; (a) <b>Reporter email</b> must match the tester email supplied via <code>--tester-email</code><br>
+&nbsp; (b) <b>Date window</b>: defect created within ±{DEFECT_WINDOW_DAYS} days of the run timestamp<br><br>
+
+<b>Stage 2 — Hybrid confidence score</b> = {alpha_pct}% rule + {beta_pct}% semantic<br><br>
+
+<b>Rule-based component</b> (weight {alpha_pct}%)<br>
+&nbsp; +0.60 exact TC_* test name found verbatim in defect summary or description<br>
+&nbsp; +0.25 test-name stem words (e.g. "bulkimport", "ssredirect") found in defect text<br>
+&nbsp; +0.15 ≥1 shared diagnostic token between failure log and defect description<br><br>
+
+<b>Semantic component</b> (weight {beta_pct}%, model: <code>{DEFAULT_EMBED_MODEL}</code>)<br>
+&nbsp; Cosine similarity between L2-normalised embeddings of the test <code>failure_msg</code><br>
+&nbsp; and the defect <code>summary + description</code>. Embeddings are computed once and<br>
+&nbsp; cached as float32 BLOBs in the <code>embeddings</code> table — only new records are re-embedded.<br>
+&nbsp; If FlagEmbedding is not installed, weight falls back to 100% rule-based.<br><br>
+
+<b>Confirmed threshold</b>: both gates ✓ AND final score ≥ 0.50<br>
+<b>Min stored threshold</b>: score ≥ {DEFECT_MIN_CONFIDENCE} (lower scores are silently discarded)
+
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # ── Inline Jira + mapping uploader ──────────────────────────────────────
+    with st.expander("⬆  Upload new Jira defect JSON & run mapping", expanded=False):
+        st.markdown(
+            f'<div class="info-banner">'
+            f'Upload a JSON file containing one or more Jira defect records '
+            f'(single object, list, or Jira API <code>{{"issues": [...]}}</code> format). '
+            f'Defects are ingested and the <b>hybrid rule + semantic</b> mapping is re-run immediately. '
+            f'Embeddings are cached — only new defects and results are re-embedded.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        col_up, col_opt = st.columns([2, 1])
+        with col_up:
+            uploaded = st.file_uploader(
+                "Jira defects JSON file",
+                type=["json", "txt"],
+                key="jira_upload",
+                label_visibility="collapsed",
+            )
+        with col_opt:
+            tester_email = st.text_input(
+                "Tester / reporter email (optional)",
+                placeholder="tester@hpe.com",
+                key="tester_email_input",
+            )
+            window = st.number_input(
+                "Date window (days)",
+                min_value=1, max_value=90, value=7,
+                key="window_days_input",
+            )
+            overwrite_mode  = st.checkbox("Overwrite existing mappings", value=False, key="overwrite_mappings")
+            no_semantic     = st.checkbox("Rule-only mode (no embeddings)", value=False, key="no_semantic_toggle",
+                                          help="Disable BAAI/bge-small-en-v1.5 — faster but misses paraphrased defects")
+
+        if uploaded is not None:
+            if st.button("🔗  Ingest & Map", key="run_mapping_btn", type="primary"):
+                import json as _json
+                try:
+                    raw = _json.loads(uploaded.read().decode("utf-8"))
+                    if isinstance(raw, dict) and "issues" in raw:
+                        records = raw["issues"]
+                    elif isinstance(raw, list):
+                        records = raw
+                    elif isinstance(raw, dict) and "key" in raw:
+                        records = [raw]
+                    else:
+                        records = list(raw.values())
+
+                    conn2 = _open_write_conn(db_paths)
+                    if conn2 is None:
+                        st.error("Database not found.")
+                    else:
+                        if load_jira_defects_from_list is None or ingest_jira_defects is None or map_defects_to_test_results is None:
+                            st.error("Jira ingestion is unavailable.")
+                        else:
+                            parsed = load_jira_defects_from_list(records)
+                            istats = ingest_jira_defects(conn2, parsed, overwrite=False)
+
+                            # Disable semantic if toggled
+                            from pipeline import _EMBED_MODEL_CACHE
+                            if no_semantic:
+                                _EMBED_MODEL_CACHE[DEFAULT_EMBED_MODEL] = None
+
+                            mstats = map_defects_to_test_results(
+                                conn2,
+                                tester_email   = tester_email.strip() or None,
+                                window_days    = int(window),
+                                overwrite      = overwrite_mode,
+                            )
+                            conn2.close()
+                            mode_label = "rule-only" if no_semantic or not mstats.get("semantic_enabled") else "hybrid rule+semantic"
+                            st.success(
+                                f"✅  Ingested {istats['inserted']} defects "
+                                f"({istats['skipped']} already existed). "
+                                f"Wrote {mstats['mappings_written']} mappings "
+                                f"({mstats['confirmed']} confirmed) using {mode_label} scoring. "
+                                f"Refresh to see updated results."
+                            )
+                            st.cache_resource.clear()
+                            st.cache_data.clear()
+                except Exception as exc:
+                    st.error(f"Error processing file: {exc}")
+
+    st.markdown('<div style="margin-top:.4rem;"></div>', unsafe_allow_html=True)
+
+    # ── Empty state ───────────────────────────────────────────────────────────
+    if df_mappings.empty and df_defects.empty:
+        st.markdown(
+            f'<div class="info-banner">'
+            f'ℹ  No defects ingested yet. Upload a file above, use<br>'
+            f'<code>python pipeline.py --fetch-jira --map-defects</code> for live Jira sync, or<br>'
+            f'<code>python pipeline.py --ingest-jira ./defects.json --map-defects</code> for file ingestion.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # ── Live Jira fetch button ────────────────────────────────────────────────
+    with st.expander("🔄  Live Jira Sync", expanded=False):
+        st.markdown(
+            f'<div class="info-banner">'
+            f'Pull the latest defects directly from your Jira instance via REST API v3. '
+            f'Requires <code>JIRA_BASE_URL</code>, <code>JIRA_EMAIL</code>, and '
+            f'<code>JIRA_API_TOKEN</code> to be set in your <code>.env</code> file or environment. '
+            f'After fetching, mapping is re-run automatically.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        lc1, lc2, lc3 = st.columns([1, 1, 1])
+        with lc1:
+            live_since   = st.number_input("Fetch last N days", min_value=1, max_value=365, value=7, key="live_since")
+        with lc2:
+            live_email   = st.text_input("Tester email (optional)", placeholder="tester@hpe.com", key="live_email")
+        with lc3:
+            live_writeback = st.checkbox("Write back to Jira after mapping", value=False, key="live_writeback")
+            live_dry_run   = st.checkbox("Dry run (no writes)", value=False, key="live_dry_run")
+
+        if st.button("🔄  Fetch from Jira & Map", key="live_fetch_btn", type="primary"):
+            try:
+                from jira_client import (
+                    load_credentials, fetch_defects, test_connection,
+                    write_back_confirmed_mappings,
+                )
+                creds = load_credentials()
+                test  = test_connection(creds)
+                if not test["ok"]:
+                    st.error(f"Jira connection failed: {test['error']}")
+                else:
+                    with st.spinner(f"Fetching from {creds.base_url} …"):
+                        conn2 = _open_write_conn(db_paths)
+                        if conn2 is None:
+                            st.error("Failed to open writeable database connection.")
+                            st.stop()
+                        live_records = []
+                        for raw in fetch_defects(
+                            creds,
+                            since_days     = int(live_since),
+                            reporter_email = live_email.strip() or creds.email,
+                        ):
+                            loader = load_jira_defects_from_list
+                            if loader is None:
+                                raise ImportError("load_jira_defects_from_list is unavailable")
+                            parsed = loader([raw])
+                            live_records.extend(parsed)
+                        ingest_fn = ingest_jira_defects
+                        if ingest_fn is None:
+                            raise ImportError("ingest_jira_defects is unavailable")
+                        istats = ingest_fn(conn2, live_records, overwrite=False)
+                    st.info(f"Fetched {len(live_records)} issues — {istats['inserted']} new, {istats['skipped']} already present.")
+
+                    with st.spinner("Running hybrid mapping …"):
+                        mapper_fn = map_defects_to_test_results
+                        if mapper_fn is None:
+                            raise ImportError("map_defects_to_test_results is unavailable")
+                        mstats = mapper_fn(
+                            conn2,
+                            tester_email = live_email.strip() or creds.email or None,
+                            window_days  = int(live_since),
+                        )
+                    mode = "hybrid rule+semantic" if mstats.get("semantic_enabled") else "rule-only"
+                    st.info(f"Mapping done ({mode}): {mstats['mappings_written']} written, {mstats['confirmed']} confirmed.")
+
+                    if live_writeback:
+                        with st.spinner("Writing back to Jira …"):
+                            wstats = write_back_confirmed_mappings(
+                                conn2, creds, dry_run=live_dry_run
+                            )
+                        label = "[DRY RUN] " if live_dry_run else ""
+                        st.success(
+                            f"✅ {label}Write-back: {wstats['comments_posted']} comments posted, "
+                            f"{wstats['fields_updated']} fields updated, "
+                            f"{wstats['skipped']} already synced."
+                        )
+                    conn2.close()
+                    st.cache_resource.clear()
+                    st.cache_data.clear()
+                    st.rerun()
+
+            except EnvironmentError as exc:
+                st.error(
+                    f"Missing Jira credentials: {exc}\n\n"
+                    "Create a `.env` file with JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN."
+                )
+            except ImportError:
+                st.error(
+                    "jira_client.py not found or `requests` not installed.\n"
+                    "Run: `pip install requests python-dotenv`"
+                )
+            except Exception as exc:
+                st.error(f"Unexpected error: {exc}")
+
+    st.markdown('<div style="margin-top:.4rem;"></div>', unsafe_allow_html=True)
+
+    # ── Tab layout within the section ────────────────────────────────────────
+    dt1, dt2, dt3, dt4, dt5 = st.tabs([
+        "🔗  Confirmed Mappings",
+        "🔍  All Candidates",
+        "📋  Defect Registry",
+        "📡  Jira Sync Log",
+        "⚠️  Duplicate Defects",
+    ])
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 1 — Confirmed Mappings
+    # ════════════════════════════════════════════════════════════════════════
+    with dt1:
+        df_conf = df_mappings[df_mappings["confirmed"] == 1].copy() if not df_mappings.empty else pd.DataFrame()
+
+        if df_conf.empty:
+            st.markdown(
+                f'<div class="info-banner">'
+                f'ℹ  No confirmed mappings yet.<br>'
+                f'A mapping is confirmed when: reporter email matches the tester, '
+                f'the defect was created within {DEFECT_WINDOW_DAYS} days of the run, '
+                f'and the confidence score ≥ 0.5.<br>'
+                f'Supply the <code>--tester-email</code> flag when running the pipeline, '
+                f'or upload defects using the form above.'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # ── Filters ──────────────────────────────────────────────────────
+            f1, f2, f3 = st.columns([1.8, 1.4, 1.4])
+            with f1:
+                proj_opts = ["All projects"] + sorted(df_conf["defect_project"].dropna().unique().tolist())
+                sel_proj  = st.selectbox("Project", proj_opts, key="conf_proj")
+            with f2:
+                test_opts = ["All tests"] + sorted(df_conf["test_name"].dropna().unique().tolist())
+                sel_test  = st.selectbox("Test", test_opts, key="conf_test")
+            with f3:
+                status_opts = ["All statuses"] + sorted(df_conf["defect_status"].dropna().unique().tolist())
+                sel_status  = st.selectbox("Defect status", status_opts, key="conf_status")
+
+            df_show = df_conf.copy()
+            if sel_proj   != "All projects":  df_show = df_show[df_show["defect_project"] == sel_proj]
+            if sel_test   != "All tests":     df_show = df_show[df_show["test_name"]      == sel_test]
+            if sel_status != "All statuses":  df_show = df_show[df_show["defect_status"]  == sel_status]
+
+            st.markdown(
+                f'<div style="font:400 0.75rem/1.6 \'JetBrains Mono\',monospace; '
+                f'color:{C["muted"]}; margin:.6rem 0 1rem;">'
+                f'Showing <b style="color:{C["txt"]};">{len(df_show)}</b> confirmed mapping'
+                f'{"s" if len(df_show) != 1 else ""} · '
+                f'Sorted by confidence ↓</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── Detect multi-test defects ──────────────────────────────────
+            defect_test_counts = df_show.groupby("defect_id")["test_name"].nunique()
+            multi_defect_ids   = set(defect_test_counts[defect_test_counts > 1].index)
+
+            # ── Render defect cards ────────────────────────────────────────
+            for _, row in df_show.head(50).iterrows():                
+                score       = float(row["confidence_score"])
+                color       = _conf_color(score)
+                is_multi    = row["defect_id"] in multi_defect_ids
+                multi_html  = (
+                    f'<span class="multi-badge">⛓ consolidated '
+                    f'({defect_test_counts[row["defect_id"]]} tests)</span> '
+                    if is_multi else ""
+                )
+                diff_days   = float(row["date_diff_days"])
+                diff_label  = f"{diff_days:.1f}d apart"
+
+                st.markdown(
+                    f'<div class="defect-card defect-confirmed">'
+                    f'  <div style="display:flex; align-items:center; gap:.7rem; margin-bottom:.2rem;">'
+                    f'    <span class="defect-key">{row["defect_id"]}</span>'
+                    f'    {_proj_tag(row["defect_project"])}'
+                    f'    {_status_pill(row.get("defect_status",""))}'
+                    f'    {multi_html}'
+                    f'    <span style="margin-left:auto; font:400 0.7rem/1 \'JetBrains Mono\',monospace; '
+                    f'color:{C["muted"]};">{diff_label}</span>'
+                    f'  </div>'
+                    f'  <div class="defect-summary">{row["defect_summary"]}</div>'
+                    f'  <div class="defect-meta">'
+                    f'    <b>Test:</b> {row["test_name"]} &nbsp;·&nbsp; '
+                    f'    <b>Run:</b> {row["run_id"]} &nbsp;·&nbsp; '
+                    f'    <b>Reporter:</b> {row.get("reporter_email","—")}'
+                    f'  </div>'
+                    f'  <div style="margin-top:.6rem;">'
+                    f'    {_conf_bar(score)}'
+                    f'  </div>'
+                    f'  <div style="margin-top:.4rem;">{_reason_tags(row.get("match_reason",""))}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 2 — All Candidates (confirmed + unconfirmed, with pre-condition flags)
+    # ════════════════════════════════════════════════════════════════════════
+    with dt2:
+        if df_mappings.empty:
+            st.markdown(
+                f'<div class="info-banner">ℹ  No mapping candidates found. '
+                f'Ingest defects and run the mapping step first.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # ── Filters ──────────────────────────────────────────────────────
+            fa, fb, fc = st.columns([1.5, 1.5, 1])
+            with fa:
+                cand_proj_opts = ["All projects"] + sorted(df_mappings["defect_project"].dropna().unique().tolist())
+                sel_cand_proj  = st.selectbox("Project", cand_proj_opts, key="cand_proj")
+            with fb:
+                cand_test_opts = ["All tests"] + sorted(df_mappings["test_name"].dropna().unique().tolist())
+                sel_cand_test  = st.selectbox("Test", cand_test_opts, key="cand_test")
+            with fc:
+                conf_filter = st.selectbox(
+                    "Confirmed",
+                    ["All", "Confirmed only", "Unconfirmed only"],
+                    key="cand_conf_filter",
+                )
+
+            df_cand = df_mappings.copy()
+            if sel_cand_proj != "All projects": df_cand = df_cand[df_cand["defect_project"] == sel_cand_proj]
+            if sel_cand_test != "All tests":    df_cand = df_cand[df_cand["test_name"]      == sel_cand_test]
+            if conf_filter == "Confirmed only":   df_cand = df_cand[df_cand["confirmed"] == 1]
+            elif conf_filter == "Unconfirmed only": df_cand = df_cand[df_cand["confirmed"] == 0]
+
+            # ── Table ─────────────────────────────────────────────────────────
+            rows_html = ""
+            for _, row in df_cand.head(100).iterrows():
+                score     = float(row["confidence_score"])
+                color     = _conf_color(score)
+                confirmed = int(row.get("confirmed", 0))
+                em        = int(row.get("email_match", 0))
+                dw        = int(row.get("date_within_window", 0))
+                conf_mark = f'<span style="color:{C["green"]}; font-weight:700;">✓ Confirmed</span>' if confirmed else f'<span style="color:{C["muted"]};">Candidate</span>'
+                em_mark   = f'<span style="color:{C["green"]};">✓</span>' if em else f'<span style="color:{C["amber"]};">–</span>'
+                dw_mark   = f'<span style="color:{C["green"]};">✓</span>' if dw else f'<span style="color:{C["amber"]};">–</span>'
+                rows_html += f"""
+                <tr>
+                  <td><span class="defect-key">{row['defect_id']}</span></td>
+                  <td>{_proj_tag(row['defect_project'])}</td>
+                  <td><span class="tname">{row['test_name']}</span></td>
+                  <td>{_status_pill(row.get('defect_status',''))}</td>
+                  <td>{em_mark}</td>
+                  <td>{dw_mark} <span style="font:400 0.68rem/1 'JetBrains Mono',monospace; color:{C['muted']};">{float(row['date_diff_days']):.1f}d</span></td>
+                  <td><span style="font:700 0.75rem/1 'JetBrains Mono',monospace; color:{color};">{score:.2f}</span></td>
+                  <td>{conf_mark}</td>
+                </tr>"""
+
+            st.markdown(
+                f'<table class="defect-table">'
+                f'<thead><tr>'
+                f'<th>Defect ID</th><th>Project</th><th>Test Name</th>'
+                f'<th>Status</th><th>Email ✓</th><th>Date Window</th>'
+                f'<th>Confidence</th><th>Confirmed</th>'
+                f'</tr></thead>'
+                f'<tbody>{rows_html}</tbody>'
+                f'</table>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown(
+                f'<div style="font:400 0.74rem/1.6 \'JetBrains Mono\',monospace; color:{C["muted"]}; margin-top:.7rem;">'
+                f'<b style="color:{C["txt"]}">Email ✓</b> — reporter_email matched the tester email supplied via <code>--tester-email</code>. '
+                f'<b style="color:{C["txt"]}">Date Window</b> — defect was created within ±{DEFECT_WINDOW_DAYS} days of the run timestamp. '
+                f'Both must hold for a mapping to be <b style="color:{C["green"]}">Confirmed</b>.</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 3 — Defect Registry  (all ingested Jira issues)
+    # ════════════════════════════════════════════════════════════════════════
+    with dt3:
+        if df_defects.empty:
+            st.markdown(
+                f'<div class="info-banner">ℹ  No Jira defects ingested. '
+                f'Use the uploader above or run:<br>'
+                f'<code>python pipeline.py --ingest-jira ./defects.json</code></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # Summary by project
+            proj_summary = df_defects.groupby("project").size().reset_index(name="count")
+            pcols = st.columns(min(len(proj_summary), 5))
+            for i, (_, row) in enumerate(proj_summary.iterrows()):
+                with pcols[i % len(pcols)]:
+                    st.markdown(
+                        f'<div class="metric-card mc-purple">'
+                        f'  <div class="mc-label">{row["project"]}</div>'
+                        f'  <div class="mc-value purple">{row["count"]}</div>'
+                        f'  <div class="mc-sub">issues ingested</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown('<div style="margin-top:1.2rem;"></div>', unsafe_allow_html=True)
+
+            # ── Per-defect registry cards ─────────────────────────────────
+            mapped_ids  = set(df_mappings["defect_id"].unique()) if not df_mappings.empty else set()
+            conf_ids    = set(df_mappings[df_mappings["confirmed"]==1]["defect_id"].unique()) if not df_mappings.empty else set()
+
+            dr_f1, dr_f2 = st.columns([2, 1.2])
+            with dr_f1:
+                reg_proj_opts = ["All projects"] + sorted(df_defects["project"].dropna().unique().tolist())
+                sel_reg_proj  = st.selectbox("Filter by project", reg_proj_opts, key="reg_proj")
+            with dr_f2:
+                reg_status_opts = ["All statuses"] + sorted(df_defects["status"].dropna().unique().tolist())
+                sel_reg_status  = st.selectbox("Filter by status", reg_status_opts, key="reg_status")
+
+            df_reg = df_defects.copy()
+            if sel_reg_proj   != "All projects":  df_reg = df_reg[df_reg["project"] == sel_reg_proj]
+            if sel_reg_status != "All statuses":  df_reg = df_reg[df_reg["status"]  == sel_reg_status]
+
+            for _, row in df_reg.head(50).iterrows():
+                did     = row["defect_id"]
+                is_conf = did in conf_ids
+                is_map  = did in mapped_ids
+                card_cls = "defect-confirmed" if is_conf else ("defect-candidate" if is_map else "defect-unmatched")
+                link_badge = (
+                    f'<span class="mc-badge badge-green">✓ confirmed</span>'
+                    if is_conf else
+                    f'<span class="mc-badge badge-amber">~ candidate</span>'
+                    if is_map else
+                    f'<span class="mc-badge badge-blue">unmapped</span>'
+                )
+                labels = _parse_labels(row.get("labels",""))
+                label_html = " ".join(
+                    f'<span style="display:inline-block; padding:1px 7px; border-radius:4px; '
+                    f'margin:2px 2px 2px 0; font:400 0.67rem/1.6 \'JetBrains Mono\',monospace; '
+                    f'background:{C["border"]}44; color:{C["muted"]}; '
+                    f'border:1px solid {C["border"]};">{lbl}</span>'
+                    for lbl in labels
+                )
+                created_str = str(row.get("created",""))[:10]
+                st.markdown(
+                    f'<div class="defect-card {card_cls}">'
+                    f'  <div style="display:flex; align-items:center; gap:.6rem; margin-bottom:.25rem;">'
+                    f'    <span class="defect-key">{did}</span>'
+                    f'    {_proj_tag(row["project"])}'
+                    f'    {_status_pill(row.get("status",""))}'
+                    f'    {link_badge}'
+                    f'    <span style="margin-left:auto; font:400 0.7rem/1 \'JetBrains Mono\',monospace; '
+                    f'color:{C["muted"]};">{created_str}</span>'
+                    f'  </div>'
+                    f'  <div class="defect-summary">{row["summary"]}</div>'
+                    f'  <div class="defect-meta">'
+                    f'    <b>Reporter:</b> {row.get("reporter_email","—")} &nbsp;·&nbsp; '
+                    f'    <b>Priority:</b> {row.get("priority","—")} &nbsp;·&nbsp; '
+                    f'    <b>Type:</b> {row.get("issue_type","—")}'
+                    f'  </div>'
+                    f'  <div style="margin-top:.5rem;">{label_html}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 4 — Jira Sync Log
+    # ════════════════════════════════════════════════════════════════════════
+    with dt4:
+        conn_sl = _open_db_conn(db_paths)
+        tables_sl = (
+            {r[0] for r in conn_sl.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if conn_sl else set()
+        )
+
+        if "jira_sync_log" not in tables_sl or conn_sl is None:
+            st.markdown(
+                f'<div class="info-banner">ℹ  Jira sync log table not found. '
+                f'Apply the updated <code>schema.sql</code> and run '
+                f'<code>python pipeline.py --writeback</code> to populate it.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            try:
+                from jira_client import get_sync_stats, load_sync_log
+                sync_stats = get_sync_stats(conn_sl)
+                sync_rows  = load_sync_log(conn_sl)
+
+                # ── KPI strip ─────────────────────────────────────────────────
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sync_kpis = [
+                    (sc1, "TOTAL SYNCED",   sync_stats["total_synced"],  "blue"),
+                    (sc2, "SUCCESSFUL",     sync_stats["successes"],     "green"),
+                    (sc3, "ERRORS",         sync_stats["errors"],        "amber"),
+                    (sc4, "LAST SYNC",      str(sync_stats["last_sync_at"])[:16], "purple"),
+                ]
+                for col, label, value, color in sync_kpis:
+                    with col:
+                        st.markdown(
+                            f'<div class="metric-card mc-{color}">'
+                            f'  <div class="mc-label">{label}</div>'
+                            f'  <div class="mc-value {color}">{value}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown('<div style="margin-top:1.2rem;"></div>', unsafe_allow_html=True)
+
+                if not sync_rows:
+                    st.markdown(
+                        f'<div class="info-banner">ℹ  No sync entries yet. '
+                        f'Run <code>python pipeline.py --writeback</code> to post confirmed '
+                        f'mappings as Jira comments.</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    # Build Jira base URL for hyperlinks
+                    jira_base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+
+                    rows_html = ""
+                    for r in sync_rows:
+                        s = str(r["status"])
+                        if s == "success":
+                            status_html = f'<span class="status-pill status-closed">✓ success</span>'
+                        elif s == "error":
+                            status_html = f'<span class="status-pill status-triage">✗ error</span>'
+                        else:
+                            status_html = f'<span class="status-pill status-other">– skipped</span>'
+
+                        dry_html = (
+                            f'<span style="font:400 0.66rem/1 \'JetBrains Mono\',monospace; '
+                            f'color:{C["amber"]};">dry run</span>'
+                            if r["dry_run"] else ""
+                        )
+                        err_html = (
+                            f'<span style="font:400 0.68rem/1.4 \'JetBrains Mono\',monospace; '
+                            f'color:{C["amber"]}; display:block;">{r["error_msg"]}</span>'
+                            if r["error_msg"] else ""
+                        )
+                        did = r["defect_id"]
+                        if jira_base:
+                            did_html = (
+                                f'<a href="{jira_base}/browse/{did}" target="_blank" '
+                                f'style="color:{C["blue"]}; text-decoration:none; '
+                                f'font:700 0.78rem/1 \'JetBrains Mono\',monospace;">{did}</a>'
+                            )
+                        else:
+                            did_html = f'<span class="defect-key">{did}</span>'
+
+                        written = str(r["written_at"] or "")[:16]
+                        rows_html += f"""
+                        <tr>
+                          <td>{did_html}</td>
+                          <td><span style="font:400 0.75rem/1 'JetBrains Mono',monospace;
+                              color:{C['txt']};">{r['run_id']}</span></td>
+                          <td>{status_html} {dry_html}</td>
+                          <td><span style="font:400 0.7rem/1 'JetBrains Mono',monospace;
+                              color:{C['muted']};">{written}</span></td>
+                          <td>{err_html}</td>
+                        </tr>"""
+
+                    st.markdown(
+                        f'<table class="defect-table">'
+                        f'<thead><tr>'
+                        f'<th>Defect</th><th>Run ID</th><th>Status</th>'
+                        f'<th>Written At</th><th>Error</th>'
+                        f'</tr></thead>'
+                        f'<tbody>{rows_html}</tbody>'
+                        f'</table>',
+                        unsafe_allow_html=True,
+                    )
+
+                    if jira_base:
+                        st.markdown(
+                            f'<div style="font:400 0.72rem/1.6 \'JetBrains Mono\',monospace; '
+                            f'color:{C["muted"]}; margin-top:.6rem;">'
+                            f'Defect keys link to <b style="color:{C["txt"]};">{jira_base}</b></div>',
+                            unsafe_allow_html=True,
+                        )
+
+            except ImportError:
+                st.markdown(
+                    f'<div class="warn-banner">⚠  jira_client.py not found — '
+                    f'sync log stats unavailable.</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Tab 5 — Duplicate Defect Detection
+    # ════════════════════════════════════════════════════════════════════════
+    with dt5:
+        st.markdown(
+            f'<div class="defect-meta" style="margin-bottom:1rem; line-height:1.8;">'
+            f'Surfaces pairs of Jira defects that likely describe <b>the same underlying failure</b> '
+            f'and should be merged or linked in Jira.<br>'
+            f'Detection criteria: same TC_* test name in both summaries, created within the date window, '
+            f'and cosine similarity ≥ threshold between their cached embeddings '
+            f'(falls back to Jaccard overlap if embeddings are not yet computed).'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        dup_c1, dup_c2 = st.columns([1, 1])
+        with dup_c1:
+            dup_threshold = st.slider(
+                "Similarity threshold", min_value=0.70, max_value=1.00,
+                value=0.90, step=0.01, key="dup_threshold_slider",
+            )
+        with dup_c2:
+            dup_window = st.number_input(
+                "Date window (days)", min_value=1, max_value=90,
+                value=7, key="dup_window",
+            )
+
+        if st.button("🔍  Detect Duplicates", key="detect_dup_btn"):
+            try:
+                from jira_client import detect_duplicate_defects
+                conn_dup = _open_db_conn(db_paths)
+                if conn_dup is None:
+                    st.error("Database not found.")
+                else:
+                    with st.spinner("Scanning for duplicates …"):
+                        dups = detect_duplicate_defects(
+                            conn_dup,
+                            model_name    = DEFAULT_EMBED_MODEL,
+                            sim_threshold = dup_threshold,
+                            window_days   = dup_window,
+                        )
+
+                    if not dups:
+                        st.success(
+                            f"✅  No duplicate pairs found above threshold {dup_threshold:.2f}."
+                        )
+                    else:
+                        st.warning(f"⚠  {len(dups)} potential duplicate pair(s) detected:")
+                        jira_base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+
+                        for dup in dups:
+                            sim_color = _conf_color(dup["similarity"])
+                            def _did_link(did: str) -> str:
+                                if jira_base:
+                                    return (
+                                        f'<a href="{jira_base}/browse/{did}" target="_blank" '
+                                        f'style="color:{C["blue"]}; font:700 0.78rem/1 '
+                                        f'\'JetBrains Mono\',monospace; text-decoration:none;">{did}</a>'
+                                    )
+                                return f'<span class="defect-key">{did}</span>'
+
+                            st.markdown(
+                                f'<div class="defect-card defect-candidate">'
+                                f'  <div style="display:flex; align-items:center; gap:.8rem;">'
+                                f'    {_did_link(dup["defect_a"])}'
+                                f'    <span style="color:{C["muted"]}; font-size:1.1rem;">↔</span>'
+                                f'    {_did_link(dup["defect_b"])}'
+                                f'    <span style="margin-left:auto;">{_conf_bar(dup["similarity"])}</span>'
+                                f'  </div>'
+                                f'  <div class="defect-meta" style="margin-top:.5rem;">'
+                                f'    <b>Date diff:</b> {dup["date_diff_days"]} days &nbsp;·&nbsp; '
+                                f'    <b>Shared tests:</b> {", ".join(dup["shared_test_names"])}'
+                                f'  </div>'
+                                f'  <div style="margin-top:.4rem;">{_reason_tags(dup["reason"])}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+
+            except ImportError:
+                st.error(
+                    "jira_client.py not found or `requests` not installed.\n"
+                    "Run: `pip install requests python-dotenv`"
+                )
+            except Exception as exc:
+                st.error(f"Error during duplicate detection: {exc}")
+
+
 def render_footer(db_paths: list[str], df_runs: pd.DataFrame) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dbs = ", ".join(Path(p).name for p in db_paths) if db_paths else "demo"
     st.markdown(
         f'<div class="dash-footer">'
-        f'  <span>Phase 3 · schema.sql v2 · Option B multi-DB</span>'
+        f'  <span>Phase 3 + Defect Mapping · schema.sql v2 · Option B multi-DB</span>'
         f'  <span>{len(df_runs)} runs · refreshed {now} · {dbs}</span>'
         f'</div>',
         unsafe_allow_html=True,
@@ -1438,16 +2491,25 @@ def main() -> None:
     db_key = "|".join(sorted(db_paths))
     with st.spinner("Opening database connections…"):
         result = get_db_data(db_key)
+
+    # Guard against unexpected return value from get_db_data
+    if not isinstance(result, (list, tuple)):
+        st.error("Failed to open database connections.")
+        st.stop()
+
     if len(result) == 3:
-        df_runs, df_results, _ = result
+        df_runs, df_results, _ = cast(tuple[pd.DataFrame, pd.DataFrame, object], result)
+    elif len(result) == 2:
+        df_runs, df_results = cast(tuple[pd.DataFrame, pd.DataFrame], result)
     else:
-        df_runs, df_results = result
+        st.error("Unexpected data returned from database.")
+        st.stop()
     if df_runs.empty:
         st.error("No run data found. Please run `python pipeline2.py` first.")
         st.stop()
 
     db_sources = sorted(df_runs["_source_db"].unique().tolist()) if "_source_db" in df_runs.columns else ["unknown"]
-    selected_source, selected_week, selected_run_id, drift_test, show_trend, show_run_inspector, show_duration_drift, show_health_matrix = render_sidebar(df_runs, db_paths, db_sources)
+    selected_source, selected_week, selected_run_id, drift_test, show_trend, show_run_inspector, show_duration_drift, show_health_matrix, show_defect_mapping = render_sidebar(df_runs, db_paths, db_sources)
 
     df_runs_f = filter_by_source(df_runs, selected_source)
     df_results_f = filter_by_source(df_results, selected_source)
@@ -1467,6 +2529,8 @@ def main() -> None:
         render_duration_drift(df_results_f, drift_test, selected_source)
     if show_health_matrix:
         render_test_health_matrix(df_results_f, selected_source)
+    if show_defect_mapping:
+        render_defect_mapping(db_paths)
     render_footer(db_paths, df_runs_f)
 
 if __name__ == "__main__":
