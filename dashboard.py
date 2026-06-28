@@ -1932,10 +1932,14 @@ def render_defect_mapping(db_paths: list[str]) -> None:
                             st.error("Failed to open writeable database connection.")
                             st.stop()
                         live_records = []
+                        
+                        # Respect CLI / UI tester_email setting
+                        tester_email = live_email.strip() or None
+
                         for raw in fetch_defects(
                             creds,
                             since_days     = int(live_since),
-                            reporter_email = live_email.strip() or creds.email,
+                            reporter_email = tester_email,
                         ):
                             loader = load_jira_defects_from_list
                             if loader is None:
@@ -1954,7 +1958,7 @@ def render_defect_mapping(db_paths: list[str]) -> None:
                             raise ImportError("map_defects_to_test_results is unavailable")
                         mstats = mapper_fn(
                             conn2,
-                            tester_email = live_email.strip() or creds.email or None,
+                            tester_email = tester_email,
                             window_days  = int(live_since),
                         )
                     mode = "hybrid rule+semantic" if mstats.get("semantic_enabled") else "rule-only"

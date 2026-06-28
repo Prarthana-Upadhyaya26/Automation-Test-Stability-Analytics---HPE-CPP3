@@ -5,7 +5,7 @@ DEFAULT_CONFIG = {
     "num_runs":          100,
     "anomaly_runs":      [36, 37],
     "anomaly_pass_rate": 0.27,
-    "start_date":        "2026-01-01",
+    "start_date":        "2024-10-01",
     "interval_hours":    24,
     "output_dir":        "./runs",
     "seed":              42,

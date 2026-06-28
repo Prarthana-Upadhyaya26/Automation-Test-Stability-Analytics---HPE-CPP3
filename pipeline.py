@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 from pathlib import Path
 from typing import Optional
@@ -15,13 +15,25 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
+    # ── Ingestion ──
     "runs_dir":      "./runs",
     "database_path": "./analytics.db",
     "schema_path":   "./schema.sql",
     "batch_size":    50,
     "force":         False,
-}
 
+    # ── Defect Mapping & Fetching ──
+    "tester_email":     None,  # None means allow all emails
+    "window_days":      7,
+    "min_confidence":   0.25,
+    "embed_model":      "BAAI/bge-small-en-v1.5",
+    "embed_batch_size": 64,
+
+    # ── Hybrid Score Weights ──
+    "alpha_rule":       0.50,
+    "beta_semantic":    0.50,
+    "semantic_reason_threshold": 0.70
+}
 
 SCHEMA_MAP = {
     "schema_v2": {
@@ -116,20 +128,15 @@ SCHEMA_MAP = {
 import pickle
 from typing import TYPE_CHECKING
 
-DEFECT_WINDOW_DAYS:    int   = 7
-DEFECT_MIN_CONFIDENCE: float = 0.25
-
-# Hybrid score weights — must sum to 1.0
-_ALPHA_RULE:     float = 0.50   # lexical rule-based component
-_BETA_SEMANTIC:  float = 0.50   # semantic embedding component
-
-# Default embedding model — swap via --embed-model CLI flag
-DEFAULT_EMBED_MODEL: str = "BAAI/bge-small-en-v1.5"
-
-# Cosine similarity threshold below which the semantic signal is not credited
-# in match_reason (it still contributes to score, but isn't labelled as a
-# "match" in the human-readable explanation).
-_SEMANTIC_REASON_THRESHOLD: float = 0.70
+# ─────────────────────────────────────────────────────────────────────────────
+# Backward compatibility exports for dashboard.py imports
+# ─────────────────────────────────────────────────────────────────────────────
+DEFECT_WINDOW_DAYS         = DEFAULT_CONFIG["window_days"]
+DEFECT_MIN_CONFIDENCE      = DEFAULT_CONFIG["min_confidence"]
+DEFAULT_EMBED_MODEL        = DEFAULT_CONFIG["embed_model"]
+_ALPHA_RULE                = DEFAULT_CONFIG["alpha_rule"]
+_BETA_SEMANTIC             = DEFAULT_CONFIG["beta_semantic"]
+_SEMANTIC_REASON_THRESHOLD = DEFAULT_CONFIG["semantic_reason_threshold"]
 
 # Stopwords for lexical tokenisation — intentionally minimal; only tokens
 # that are *always* diagnostic noise in CI failure / Jira text.
@@ -245,7 +252,8 @@ def _parse_jira_timestamp(ts: str) -> Optional[datetime]:
     try:
         dt = datetime.fromisoformat(ts)
         if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None) - dt.utcoffset()
+            offset = dt.utcoffset()
+            dt = dt.replace(tzinfo=None) - (offset if offset is not None else timedelta(0))
         return dt
     except (ValueError, TypeError):
         return None
@@ -499,7 +507,7 @@ def compute_and_cache_embeddings(
         if not texts:
             return 0
         try:
-            vecs = model.encode(texts)  # shape (N, dim), already float32
+            vecs = model.encode(texts)  # type: ignore[attr-defined]  # shape (N, dim), already float32
         except Exception as exc:
             print(f"  ✗ Embedding encode error [{entity_type}]: {exc}", file=sys.stderr)
             stats["errors"] += len(texts)
@@ -1044,10 +1052,10 @@ def map_defects_to_test_results(
         stats["candidates_evaluated"] += 1
 
         # ── Gate (a): email match ─────────────────────────────────────────────
-        email_match = (
-            1 if (norm_tester_email and row["reporter_email"] == norm_tester_email)
-            else 0
-        )
+        if norm_tester_email:
+            email_match = 1 if row["reporter_email"] == norm_tester_email else 0
+        else:
+            email_match = 1  # Default: allow all emails
 
         # date_diff_days already computed in SQL — no Python datetime parsing
         date_diff          = float(row["date_diff_days"])
@@ -2035,17 +2043,16 @@ def parse_args() -> argparse.Namespace:
         help="Run hybrid rule+semantic defect-to-test-result mapping",
     )
     p.add_argument(
-        "--tester-email", default=None, metavar="EMAIL",
-        help="Tester / reporter email for pre-condition (a) matching. "
-             "Falls back to JIRA_EMAIL env var when not set.",
+        "--tester-email", default=DEFAULT_CONFIG["tester_email"], metavar="EMAIL",
+        help="Filter defects by reporter email. If omitted, allows all emails.",
     )
     p.add_argument(
-        "--window-days", type=int, default=DEFECT_WINDOW_DAYS,
-        help=f"Max calendar days between defect creation and run time (default: {DEFECT_WINDOW_DAYS})",
+        "--window-days", type=int, default=DEFAULT_CONFIG["window_days"],
+        help=f"Max calendar days between defect creation and run time (default: {DEFAULT_CONFIG['window_days']})",
     )
     p.add_argument(
-        "--min-confidence", type=float, default=DEFECT_MIN_CONFIDENCE,
-        help=f"Minimum hybrid confidence score to store a mapping (default: {DEFECT_MIN_CONFIDENCE})",
+        "--min-confidence", type=float, default=DEFAULT_CONFIG["min_confidence"],
+        help=f"Minimum hybrid confidence score to store a mapping (default: {DEFAULT_CONFIG['min_confidence']})",
     )
     p.add_argument(
         "--overwrite-mappings", action="store_true", default=False,
@@ -2054,12 +2061,12 @@ def parse_args() -> argparse.Namespace:
 
     # ── Semantic embedding controls ───────────────────────────────────────────
     p.add_argument(
-        "--embed-model", default=DEFAULT_EMBED_MODEL, metavar="MODEL_ID",
-        help=f"HuggingFace model ID for semantic embeddings (default: {DEFAULT_EMBED_MODEL})",
+        "--embed-model", default=DEFAULT_CONFIG["embed_model"], metavar="MODEL_ID",
+        help=f"HuggingFace model ID for semantic embeddings (default: {DEFAULT_CONFIG['embed_model']})",
     )
     p.add_argument(
-        "--embed-batch-size", type=int, default=64, metavar="N",
-        help="Number of texts per model.encode() call (default: 64)",
+        "--embed-batch-size", type=int, default=DEFAULT_CONFIG["embed_batch_size"], metavar="N",
+        help=f"Number of texts per model.encode() call (default: {DEFAULT_CONFIG['embed_batch_size']})",
     )
     p.add_argument(
         "--force-reembed", action="store_true", default=False,
@@ -2218,7 +2225,7 @@ if __name__ == "__main__":
             from jira_client import load_credentials, fetch_defects
             creds = load_credentials()
             print(f"  Endpoint  : {creds.base_url}")
-            print(f"  Reporter  : {creds.email}")
+            print(f"  Reporter  : {args.tester_email or 'ANY (allowing all emails)'}")
             print(f"  Projects  : {', '.join(creds.projects)}")
             print(f"  Window    : last {args.since_days} days")
             if args.extra_jql:
@@ -2232,7 +2239,7 @@ if __name__ == "__main__":
             for raw in fetch_defects(
                 creds,
                 since_days     = args.since_days,
-                reporter_email = creds.email,
+                reporter_email = args.tester_email,
                 extra_jql      = args.extra_jql,
             ):
                 fetched_count += 1
@@ -2283,13 +2290,9 @@ if __name__ == "__main__":
         print("=" * 70)
         print()
 
-        # Resolve tester email: CLI flag → JIRA_EMAIL env var → None
-        tester_email = (
-            args.tester_email
-            or os.environ.get("JIRA_EMAIL")
-            or None
-        )
-        print(f"  Tester email       : {tester_email or '(not set — email_match will be 0)'}")
+        # Resolve tester email directly from CLI (None = allow all)
+        tester_email = args.tester_email
+        print(f"  Tester email       : {tester_email or 'ANY (allowing all emails)'}")
         print(f"  Window (days)      : ±{args.window_days}")
         print(f"  Min confidence     : {args.min_confidence}")
         print(f"  Overwrite mode     : {'yes' if args.overwrite_mappings else 'no (incremental)'}")
