@@ -1,0 +1,66 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.env/
+.venv/
+env/
+.hpe_project/
+
+# =========================
+# Generated Data
+# =========================
+runs/
+*.xml
+*.json
+
+# =========================
+# Logs & temp files
+# =========================
+*.log
+*.tmp
+*.swp
+*.swo
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# Jupyter / Notebooks
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Misc
+# =========================
+*.sqlite3
+*.db
+
+# =========================
+# Project-specific
+# =========================
+Automation-Test-Stability-Analytics---HPE-CPP3/
+.claude/settings.local.json
+CPP_Test_Stability_Analytics.pptx

@@ -1,0 +1,3 @@
+set JIRA_URL=https://civilel-35430783.atlassian.net
+set JIRA_EMAIL=aditishastri.is23@rvce.edu.in
+set JIRA_TOKEN=ATATT3xFfGF0nQOxDpGFja3ICrP0QYrUNaO0hUjF-KjNAfhpmX2sztxB8d_0SzZUKOwla_xniJ7ouikL0cnj9gjEwEmpGh8GRS_SOBeRTrdsfdirrYUW7PJ5PYkYK8L-W3tD9NS4J9kegUWR9bLKKd5UlEjQNTyYUpfPtUbc_06fp0WoztaHc1Y=50496453

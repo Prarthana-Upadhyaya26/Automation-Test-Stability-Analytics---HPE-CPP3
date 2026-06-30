@@ -1,0 +1,94 @@
+Issue 1 — Login timeout under load
+Automation log failure:
+Timeout occurred during TC_Login_ValidCredentials execution after 45s; 
+authentication service did not respond within expected window.
+json{
+  "key": "CSSOSE-0002",
+  "summary": "Generic: Intermittent timeout in TC_Login_ValidCredentials during regression execution",
+  "description": "Issue Overview:\nSingle-test instability observed for TC_Login_ValidCredentials in CI regression runs. Failure is intermittent and appears related to authentication service response latency under concurrent load.\n\nFailure Signature (Synthetic):\n- Keyword: Verify Login Response\n- Sample Message: Authentication service did not respond within 45s; expected response under 10s\n- Sample Duration: 45.18s\n\nReproduction (Generic):\n1. Trigger full regression in staging under concurrent user load.\n2. Execute at least 3 consecutive runs.\n3. Observe TC_Login_ValidCredentials result variation (PASS/FAIL).\n4. On FAIL, check service response time in logs.\n\nExpected Behavior:\n- Login should authenticate successfully within 10 seconds consistently.\n\nActual Behavior:\n- Authentication intermittently times out when concurrent sessions exceed threshold.\n\nImpact:\n- Flaky signal on login module reduces confidence in regression pass-rate.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-04\n- Environment: staging\n- Data Window: last 14 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Investigate auth service response degradation under load.\n- Add retry mechanism with exponential backoff for login step.\n- Capture service logs during failure window for correlation.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Triage",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "CSSOSE",
+  "labels": ["automation", "single-test", "flaky", "login", "timeout"],
+  "components": ["OS : OS - Linux"],
+  "created": "2026-06-05T08:15:00.000+0000"
+}
+
+Issue 2 — UI element not found after front-end update
+Automation log failure:
+Element not found during TC_Dashboard_FilterByDate execution; 
+locator '#date-range-picker' returned no match on current DOM.
+json{
+  "key": "CSSE-0014",
+  "summary": "Generic: Element not found in TC_Dashboard_FilterByDate during regression execution",
+  "description": "Issue Overview:\nConsistent test failure observed for TC_Dashboard_FilterByDate following recent UI deployment. Locator mismatch suggests a front-end change has not been reflected in the test script.\n\nFailure Signature (Synthetic):\n- Keyword: Click Date Range Picker\n- Sample Message: Element '#date-range-picker' not found in DOM after 10s implicit wait\n- Sample Duration: 12.05s\n\nReproduction (Generic):\n1. Deploy latest front-end build to staging.\n2. Execute TC_Dashboard_FilterByDate in isolation.\n3. Observe failure at date picker interaction step.\n4. Inspect DOM for updated element identifier.\n\nExpected Behavior:\n- Date range picker should be accessible and interactable via the defined locator.\n\nActual Behavior:\n- Element lookup fails consistently; locator no longer matches the rendered DOM structure.\n\nImpact:\n- Entire filter-by-date test path is blocked, masking downstream validation coverage.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-01\n- Environment: staging\n- Data Window: last 7 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Review front-end changelog for locator or component rename.\n- Update test locator to match current DOM.\n- Add locator resilience strategy (e.g., data-testid attributes) to avoid recurrence.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "In Progress",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "CSSE",
+  "labels": ["automation", "ui", "locator-mismatch", "dashboard"],
+  "components": ["OS : OS - Linux"],
+  "created": "2026-06-07T11:00:00.000+0000"
+}
+
+Issue 3 — API response schema mismatch
+Automation log failure:
+Assertion failed during TC_API_UserProfile_Get execution; 
+response body missing field 'accountStatus' expected by validation schema.
+json{
+  "key": "CSSOSE-0003",
+  "summary": "Generic: Schema assertion failure in TC_API_UserProfile_Get during regression execution",
+  "description": "Issue Overview:\nTest failure observed for TC_API_UserProfile_Get due to missing field in API response. Likely caused by a back-end schema change not communicated to the automation team.\n\nFailure Signature (Synthetic):\n- Keyword: Validate Response Schema\n- Sample Message: Expected field 'accountStatus' not present in response body; received keys: ['id', 'name', 'email']\n- Sample Duration: 4.72s\n\nReproduction (Generic):\n1. Execute TC_API_UserProfile_Get against staging API endpoint.\n2. Capture raw response body.\n3. Compare against expected schema definition in test.\n4. Observe missing field in response.\n\nExpected Behavior:\n- API response should include 'accountStatus' field as per contract definition.\n\nActual Behavior:\n- Response omits 'accountStatus'; validation step raises assertion error.\n\nImpact:\n- User profile API contract violation goes undetected in downstream services relying on this field.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-03\n- Environment: staging\n- Data Window: last 7 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Confirm whether 'accountStatus' field was intentionally removed or renamed in latest API version.\n- Update schema validation in test if field was renamed.\n- Enforce API contract testing (e.g., Pact) to catch schema drift earlier.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Triage",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "CSSOSE",
+  "labels": ["automation", "api", "schema-mismatch", "regression"],
+  "components": ["OS : OS - Linux"],
+  "created": "2026-06-09T09:45:00.000+0000"
+}
+
+Issue 4 — Database connection pool exhaustion
+Automation log failure:
+Environment error during TC_Report_GenerateMonthly execution; 
+database connection pool exhausted after 30s wait, no connections available.
+json{
+  "key": "MCIO-0007",
+  "summary": "Generic: Environment failure in TC_Report_GenerateMonthly due to DB connection exhaustion",
+  "description": "Issue Overview:\nTest failure observed for TC_Report_GenerateMonthly due to infrastructure-level database connection pool exhaustion. Failure is environment-dependent and not caused by test logic.\n\nFailure Signature (Synthetic):\n- Keyword: Initialize DB Connection\n- Sample Message: Connection pool exhausted; waited 30s for available connection, max pool size: 10\n- Sample Duration: 30.91s\n\nReproduction (Generic):\n1. Trigger full regression suite in staging (parallel execution enabled).\n2. Execute TC_Report_GenerateMonthly alongside other DB-heavy tests.\n3. Observe connection pool error in test logs.\n4. Confirm pool utilization metrics at time of failure.\n\nExpected Behavior:\n- Test should acquire a DB connection within 5 seconds and proceed with report generation.\n\nActual Behavior:\n- Connection pool is fully occupied by parallel test runs; test waits and eventually times out.\n\nImpact:\n- Monthly report generation test is unreliable under parallel load, causing false failures in CI.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-06\n- Environment: staging\n- Data Window: last 30 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Review parallel execution concurrency settings for DB-intensive tests.\n- Increase connection pool size or implement test sequencing for DB-heavy cases.\n- Add connection pool monitoring alert to CI dashboard.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Lab Review",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "MCIO",
+  "labels": ["automation", "environment", "database", "concurrency", "flaky"],
+  "components": ["OS : OS - Linux"],
+  "created": "2026-06-10T14:20:00.000+0000"
+}
+
+Issue 5 — File export size validation failure
+Automation log failure:
+Validation step failed during TC_Export_AuditLogs execution; 
+exported file size was 0 bytes, expected non-empty CSV output.
+json{
+  "key": "CSSE-0021",
+  "summary": "Generic: Empty file export in TC_Export_AuditLogs during regression execution",
+  "description": "Issue Overview:\nTest failure observed for TC_Export_AuditLogs where the exported audit log file is consistently 0 bytes. Likely related to a data availability or export trigger timing issue in staging.\n\nFailure Signature (Synthetic):\n- Keyword: Verify Export File Size\n- Sample Message: Exported file 'audit_logs_export.csv' has size 0 bytes; expected minimum 1KB\n- Sample Duration: 8.34s\n\nReproduction (Generic):\n1. Trigger audit log export via UI in staging environment.\n2. Wait for export completion notification.\n3. Download exported file.\n4. Verify file size is greater than 0 bytes.\n\nExpected Behavior:\n- Exported CSV should contain audit log entries for the configured date range, resulting in a non-empty file.\n\nActual Behavior:\n- Export completes without error but produces an empty file, suggesting data is not being written correctly.\n\nImpact:\n- Audit log export feature appears functional but delivers no data, which could mask compliance gaps in production.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-02\n- Environment: staging\n- Data Window: last 30 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Verify audit log data exists in staging DB for the configured export window.\n- Check export service logs for silent write failure.\n- Add pre-condition in test to confirm data availability before triggering export.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Closed - No Change",
+  "priority": "Undecided",
+  "issuetype": "Bug",
+  "project": "CSSE",
+  "labels": ["automation", "export", "data-validation", "audit"],
+  "components": ["OS : OS - Linux"],
+  "created": "2026-06-12T16:00:00.000+0000"
+}

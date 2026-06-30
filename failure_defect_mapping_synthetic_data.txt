@@ -1,0 +1,133 @@
+Issue 1 - Bulk import data inconsistency
+Automation log failure:
+CSV import validation failed during TC_User_BulkImport; only 2 rows processed.
+{
+  "key": "CSSE-0028",
+  "summary": "Generic: Data inconsistency in TC_User_BulkImport during regression execution",
+  "description": "Issue Overview:\nBulk user import test shows severe data mismatch.\n\nFailure Signature (Synthetic):\n- Keyword: Verify Row Count\n- Sample Message: Processed 2 rows, expected >=200\n- Sample Duration: 44.80s\n\nReproduction (Generic):\n1. Upload CSV with user entries.\n2. Trigger bulk import.\n3. Verify record count.\n\nExpected Behavior:\n- All records should be processed.\n\nActual Behavior:\n- Only partial data processed.\n\nImpact:\n- User onboarding unreliable.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-02\n- Environment: staging\n- Data Window: last 10 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Validate parser logic.\n- Check backend batch handling.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Closed - Fixed",
+  "priority": "High",
+  "issuetype": "Bug",
+  "project": "CSSE",
+  "labels": ["automation", "user_management", "bulk-import", "data"],
+  "components": ["OS : OS - Linux"],
+  "created": "2025-10-13T11:10:00.000+0000"
+}
+
+Issue 2 - Dashboard widget load failure
+Automation log failure:
+Element not found during execution; widget '#usage-widget' not visible after 20s timeout via Wait Until Element Is Visible.
+{
+  "key": "CSSE-0030",
+  "summary": "Generic: Widget load failure in TC_Dashboard_LoadWidget",
+  "description": "Issue Overview:\nIntermittent widget loading failures.\n\nFailure Signature (Synthetic):\n- Keyword: Wait Until Element Is Visible\n- Sample Message: '#usage-widget' not found after 20s\n- Sample Duration: 20.12s\n\nReproduction (Generic):\n1. Load dashboard page.\n2. Observe widget rendering.\n\nExpected Behavior:\n- Widgets should load consistently.\n\nActual Behavior:\n- Widget missing intermittently.\n\nImpact:\n- Reduced dashboard validation reliability.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-03\n- Environment: staging\n- Data Window: last 7 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Investigate async rendering issues.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Triage",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "CSSE",
+  "labels": ["automation", "dashboard", "widget", "flaky"],
+  "components": ["Tools Misc "],
+  "created": "2026-02-14T08:45:00.000+0000"
+}
+
+Issue 3 - Dashboard refresh data stale
+Automation log failure:
+Dashboard metrics did not update after refresh action. Expected new values but received cached data.
+{
+  "key": "MCIO-0031",
+  "summary": "Generic: Assertion failure in TC_Dashboard_RefreshData due to stale data",
+  "description": "Issue Overview:\nDashboard data refresh does not update metrics.\n\nFailure Signature (Synthetic):\n- Keyword: Validate Data Refresh\n- Sample Message: Value unchanged after refresh\n- Sample Duration: 9.45s\n\nReproduction (Generic):\n1. Perform refresh action.\n2. Validate displayed values.\n\nExpected Behavior:\n- Updated data should be shown.\n\nActual Behavior:\n- Old values persist.\n\nImpact:\n- Incorrect analytics displayed.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-04\n- Environment: staging\n- Data Window: last 7 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Verify cache invalidation.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "In Progress",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "MCIO",
+  "labels": ["automation", "dashboard", "data", "assertion"],
+  "components": ["Storage"],
+  "created": "2026-06-14T12:30:00.000+0000"
+}
+
+Issue 4 - SSO element missing
+Automation log failure:
+Element not found during TC_Login_SSORedirect execution; locator '#sso-consent-button' returned no match after redirect step in authentication flow.
+{
+  "key": "CSSOSE-0015",
+  "summary": "Generic: Element not found in TC_Login_SSORedirect after SSO flow",
+  "description": "Issue Overview:\nSSO login fails due to missing UI element.\n\nFailure Signature (Synthetic):\n- Keyword: Click Consent Button\n- Sample Message: '#sso-consent-button' not found\n- Sample Duration: 22.33s\n\nReproduction (Generic):\n1. Trigger SSO login.\n2. Inspect post-redirect UI.\n\nExpected Behavior:\n- Consent UI should appear.\n\nActual Behavior:\n- Element missing.\n\nImpact:\n- SSO login validation blocked.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-01\n- Environment: staging\n- Data Window: last 10 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Update locator strategy.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Triage",
+  "priority": "High",
+  "issuetype": "Bug",
+  "project": "CSSOSE",
+  "labels": ["automation", "login", "sso", "element"],
+  "components": ["Authentication"],
+  "created": "2026-02-1T13:15:00.000+0000"
+}
+
+
+Examples of multiple tests mapped to a single defect
+
+Issue 5 - MFA & OAuth timeout 
+Automation log failures:
+Test1 - Timeout occurred during TC_Login_MFAVerification;
+Element 'mfa-overlay' still visible after 45s.
+Test2 - Timeout occurred during TC_Login_OAuthCallback;
+auth redirect did not complete within 30s.
+{
+  "key": "MCIO-1099",
+  "summary": "Generic: Authentication flow timeout across MFA and OAuth login tests",
+  "description": "Issue Overview:\nMultiple login-related test failures observed involving MFA verification and OAuth callback flows. Failures indicate UI overlay or redirect screens not resolving within expected timeframe.\n\nFailure Signature (Synthetic):\n- Keywords: Wait Until Element Is Visible / Wait Until Redirect Completes\n- Sample Messages:\n  * MFA overlay still visible after 45s\n  * OAuth redirect not completed after 30s\n- Sample Duration: 18–35s\n\nReproduction (Generic):\n1. Execute login flows with MFA enabled.\n2. Perform OAuth-based login using external provider.\n3. Observe delays in UI transition.\n\nExpected Behavior:\n- Authentication UI flow should complete within 10–15 seconds.\n\nActual Behavior:\n- UI overlays persist or redirect remains incomplete.\n\nImpact:\n- Authentication tests fail intermittently affecting login validation.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-05\n- Environment: staging\n- Data Window: last 14 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Investigate auth callback latency.\n- Improve UI transition handling.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Triage",
+  "priority": "High",
+  "issuetype": "Bug",
+  "project": "MCIO",
+  "labels": ["automation", "login", "mfa", "oauth", "timeout", "flaky"],
+  "components": ["Login Service"],
+  "created": "2026-06-13T09:20:00.000+0000"
+}
+
+Issue 6 -  Role assignment & batch export
+Automation log failures:
+Test1 - Role count mismatch during TC_User_RoleAssignment.
+Test2 - CSV export returned only 2 rows during TC_User_BatchExport.
+{
+  "key": "CSSE-0035",
+  "summary": "Generic: Data integrity issues across role assignment and batch export tests",
+  "description": "Issue Overview:\nConsistent failures have been observed across multiple user management test cases, specifically TC_User_RoleAssignment and TC_User_BatchExport. These failures point to a broader data integrity issue within the backend system, where expected datasets are either partially generated or not persisted correctly. Since the issue spans multiple independent test scenarios, it is likely caused by a shared service, database inconsistency, or faulty data retrieval logic.\n\nFailure Signature (Synthetic):\n- Keywords: Verify Row Count / Validate Roles\n- Sample Messages:\n  * Role count mismatch: expected >=50 but found only 2 records\n  * Exported CSV contains only 2 rows; expected at least 100 records\n- Sample Duration: 14–16s\n\nReproduction (Generic):\n1. Execute TC_User_RoleAssignment by assigning multiple roles to a set of users.\n2. Verify role persistence and retrieval via UI or API.\n3. Execute TC_User_BatchExport to export user-role data into CSV format.\n4. Observe record count in exported file.\n5. Repeat execution to confirm consistent failure pattern.\n\nExpected Behavior:\n- Role assignment should correctly persist all assigned roles in the system.\n- Batch export should return complete and accurate datasets based on current records.\n\nActual Behavior:\n- Role data appears partially saved or incorrectly retrieved.\n- Export functionality returns only a fraction of expected records.\n\nImpact:\n- Critical user management features become unreliable, affecting administrative workflows.\n- Potential risk of data inconsistency propagating to downstream systems.\n- High severity due to impact on authorization and data export capabilities.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-06\n- Environment: staging\n- Data Window: last 14 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Investigate database write/read consistency for role-related tables.\n- Validate API endpoints used for role assignment and export operations.\n- Check for recent backend changes affecting query filters or joins.\n- Add data validation checkpoints post-write operations to ensure completeness.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "Lab Review",
+  "priority": "High",
+  "issuetype": "Bug",
+  "project": "CSSE",
+  "labels": ["automation", "usermanagement", "data", "consistently_failing"],
+  "components": ["User management"],
+  "created": "2026-05-15T10:00:00.000+0000"
+}
+
+Issue 7 - Dashboard performance degradation 
+Automation log failures:
+Test1 - API timeout during TC_Dashboard_RefreshData.
+Test2 - Widget not loaded during TC_Dashboard_LoadWidget.
+{
+  "key": "CSSE-0040",
+  "summary": "Generic: Dashboard performance degradation",
+  "description": "Issue Overview:\nMultiple dashboard failures due to slow API and rendering delays.\n\nFailure Signature (Synthetic):\n- Keywords: API Timeout / Element Not Found\n- Sample Messages:\n  * API exceeded 25s SLA\n  * Widgets not loaded\n\nReproduction (Generic):\n1. Load dashboard under concurrent usage.\n2. Trigger refresh.\n\nExpected Behavior:\n- Dashboard loads within SLA.\n\nActual Behavior:\n- Slow responses and incomplete UI.\n\nImpact:\n- Unreliable dashboard testing.\n\nEnvironment (Synthetic):\n- CI Executor: jenkins-agent-07\n- Environment: staging\n- Data Window: last 21 days\n- OS: RHEL-like Linux test node\n\nRequested Action:\n- Optimize backend queries.",
+  "reporter": "Sample Reporter",
+  "reporter_name": "sample.reporter@hpe.com",
+  "status": "In Progress",
+  "priority": "Medium",
+  "issuetype": "Bug",
+  "project": "CSSE",
+  "labels": ["automation", "dashboard", "performance", "flaky"],
+  "components": ["Tools Misc"],
+  "created": "2026-06-16T09:50:00.000+0000"
+}

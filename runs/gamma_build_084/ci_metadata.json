@@ -1,0 +1,13 @@
+{
+  "team": "TeamGamma",
+  "suite": "gamma",
+  "program": "gamma",
+  "build_no": 84,
+  "timestamp": "2024-12-23T00:00:00",
+  "total": 23,
+  "passed": 20,
+  "failed": 3,
+  "pass_rate_pct": 87.0,
+  "environment": "staging",
+  "executor": "jenkins-agent-09"
+}
