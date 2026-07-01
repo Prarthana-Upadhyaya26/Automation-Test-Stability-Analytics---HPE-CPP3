@@ -2087,10 +2087,6 @@ def parse_args() -> argparse.Namespace:
         help="Simulate write-back — log what would be posted without calling Jira",
     )
     p.add_argument(
-        "--no-field-update", action="store_true", default=False,
-        help="Skip updating the automation custom field (comment-only write-back)",
-    )
-    p.add_argument(
         "--dashboard-url", default=None, metavar="URL",
         help="Streamlit dashboard URL embedded in Jira comments (e.g. https://your.app)",
     )
@@ -2346,7 +2342,6 @@ if __name__ == "__main__":
             creds = load_credentials()
             print(f"  Endpoint      : {creds.base_url}")
             print(f"  Dry run       : {'yes — no API calls will be made' if args.dry_run else 'no'}")
-            print(f"  Field update  : {'no (--no-field-update)' if args.no_field_update else 'yes'}")
             if args.dashboard_url:
                 print(f"  Dashboard URL : {args.dashboard_url}")
             print()
@@ -2357,13 +2352,11 @@ if __name__ == "__main__":
                 creds,
                 dashboard_url = args.dashboard_url,
                 dry_run       = args.dry_run,
-                update_field  = not args.no_field_update,
             )
             conn.close()
 
             print(f"  Attempted        : {wstats['attempted']:6d}")
             print(f"  Comments posted  : {wstats['comments_posted']:6d}")
-            print(f"  Fields updated   : {wstats['fields_updated']:6d}")
             print(f"  Skipped          : {wstats['skipped']:6d}  (already written)")
             if wstats["errors"]:
                 print(f"  ✗ Errors         : {wstats['errors']:6d}")

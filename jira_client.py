@@ -13,9 +13,6 @@ Responsibilities
                           — will not post a duplicate comment if the same
                           run_id is already recorded on the issue.
 
-  update_automation_field() Write the CI run ID into a custom Jira field
-                            (configurable per project in .env / config).
-
   detect_duplicate_defects() Surface pairs of defects in the local DB that
                              likely describe the same failure (same test name,
                              overlapping time window, high semantic similarity).
@@ -37,9 +34,6 @@ Optional per-project overrides (prefix with project key):
     CSSOSE_CONFIRM_THRESHOLD   0.60   (override global 0.50)
     CSSE_CONFIRM_THRESHOLD     0.55
     MCIO_CONFIRM_THRESHOLD     0.50
-    CSSOSE_AUTOMATION_FIELD    customfield_10042   (Jira custom field for run ID)
-    CSSE_AUTOMATION_FIELD      customfield_10042
-    MCIO_AUTOMATION_FIELD      customfield_10042
 
 Dashboard .env integration
 ──────────────────────────
@@ -83,11 +77,6 @@ _RETRY_BACKOFF      = 1.5          # exponential back-off factor
 _COMMENT_TAG        = "[automation-analytics]"  # sentinel in comments for idempotency
 _DEFAULT_PROJECTS   = ("CSSOSE", "CSSE", "MCIO")
 _DEFAULT_CONFIRM_THRESHOLD = 0.50
-_WRITEBACK_FIELDS = {
-    # Maps a human-readable label to the Jira custom field ID used for the
-    # automation run link.  Override per project via env var (see module docs).
-    "automation_run_id": "customfield_10042",
-}
 
 # ── Credentials helper ────────────────────────────────────────────────────────
 
@@ -216,7 +205,6 @@ def get_project_config(project: str) -> dict:
 
     Environment variable naming convention:
         {PROJECT}_CONFIRM_THRESHOLD     e.g. CSSOSE_CONFIRM_THRESHOLD=0.60
-        {PROJECT}_AUTOMATION_FIELD      e.g. CSSOSE_AUTOMATION_FIELD=customfield_10042
         {PROJECT}_WINDOW_DAYS           e.g. CSSOSE_WINDOW_DAYS=7
     """
     pfx = project.upper().replace("-", "_")
@@ -224,10 +212,6 @@ def get_project_config(project: str) -> dict:
         "confirm_threshold": float(
             os.environ.get(f"{pfx}_CONFIRM_THRESHOLD",
             os.environ.get("CONFIRM_THRESHOLD", str(_DEFAULT_CONFIRM_THRESHOLD)))
-        ),
-        "automation_field": os.environ.get(
-            f"{pfx}_AUTOMATION_FIELD",
-            os.environ.get("AUTOMATION_FIELD", _WRITEBACK_FIELDS["automation_run_id"]),
         ),
         "window_days": int(
             os.environ.get(f"{pfx}_WINDOW_DAYS",
@@ -623,84 +607,6 @@ def write_mapping_comment(
         return {"posted": False, "skipped": False, "reason": msg, "comment_url": None}
 
 
-# ── Write-back: update custom field ──────────────────────────────────────────
-
-def update_automation_field(
-    creds:        JiraCredentials,
-    issue_key:    str,
-    run_id:       str,
-    project:      str,
-    *,
-    dry_run:      bool = False,
-) -> dict:
-    """
-    Write the CI run ID into a configurable Jira custom field.
-
-    The target field ID is resolved via get_project_config() so different
-    projects can use different custom fields.  If the field ID is not
-    configured (empty string), this function is a no-op.
-
-    Parameters
-    ──────────
-    creds     : JiraCredentials
-    issue_key : Jira issue key
-    run_id    : CI run ID to write (e.g. "TeamAlpha_build_047")
-    project   : Jira project key — used to look up per-project field ID
-    dry_run   : if True, do not PUT, just return what would be sent
-
-    Returns
-    ───────
-    dict — {"updated": bool, "skipped": bool, "reason": str}
-    """
-    cfg      = get_project_config(project)
-    field_id = cfg["automation_field"]
-
-    if not field_id:
-        return {
-            "updated": False,
-            "skipped": True,
-            "reason":  f"No automation_field configured for project {project}",
-        }
-
-    payload = {"fields": {field_id: run_id}}
-
-    if dry_run:
-        return {
-            "updated": False,
-            "skipped": False,
-            "reason":  f"dry_run=True — would PUT {payload} to {issue_key}",
-        }
-
-    session = _make_session(creds)
-    url     = creds.api_url(f"/issue/{issue_key}")
-
-    try:
-        resp = session.put(url, json=payload, timeout=(10, 30))
-        resp.raise_for_status()
-        logger.info("Updated field '%s' on %s → %s", field_id, issue_key, run_id)
-        return {
-            "updated": True,
-            "skipped": False,
-            "reason":  f"Field '{field_id}' set to '{run_id}'",
-        }
-    except requests.HTTPError as exc:
-        code = exc.response.status_code if exc.response is not None else 0
-        # 400 often means the field doesn't exist or is read-only
-        msg  = f"HTTP {code} updating field '{field_id}' on {issue_key}"
-        if exc.response is not None:
-            try:
-                err_detail = exc.response.json()
-                msg += f": {err_detail}"
-            except Exception:
-                pass
-        logger.error(msg)
-        return {"updated": False, "skipped": False, "reason": msg}
-    except Exception as exc:
-        msg = f"Unexpected error updating field on {issue_key}: {exc}"
-        logger.error(msg)
-        return {"updated": False, "skipped": False, "reason": msg}
-
-
 # ── Bulk write-back from DB ───────────────────────────────────────────────────
 
 def write_back_confirmed_mappings(
@@ -709,11 +615,10 @@ def write_back_confirmed_mappings(
     *,
     dashboard_url:  Optional[str] = None,
     dry_run:        bool          = False,
-    update_field:   bool          = True,
 ) -> dict:
     """
-    For every confirmed mapping not yet written back, post a comment and
-    optionally update the custom field on the Jira issue.
+    For every confirmed mapping not yet written back, post a comment on
+    the Jira issue.
 
     Tracks write-back state in jira_sync_log (written, skipped, errors).
     Re-running is always safe — already-written mappings are skipped via
@@ -725,16 +630,14 @@ def write_back_confirmed_mappings(
     creds         : JiraCredentials
     dashboard_url : optional Streamlit URL embedded in the comment
     dry_run       : do not actually call Jira — log what would happen
-    update_field  : also PUT the run ID into the custom automation field
 
     Returns
     ───────
-    dict — keys: attempted, comments_posted, fields_updated, skipped, errors
+    dict — keys: attempted, comments_posted, skipped, errors
     """
     stats = {
         "attempted":        0,
         "comments_posted":  0,
-        "fields_updated":   0,
         "skipped":          0,
         "errors":           0,
     }
@@ -808,18 +711,6 @@ def write_back_confirmed_mappings(
                 comment_cache.pop(issue_key, None)
             elif c_result["skipped"]:
                 stats["skipped"] += 1
-
-            # ── 2. Update automation custom field ─────────────────────────────
-            if update_field:
-                f_result = update_automation_field(
-                    creds,
-                    issue_key = issue_key,
-                    run_id    = run_id,
-                    project   = row["defect_project"],
-                    dry_run   = dry_run,
-                )
-                if f_result["updated"]:
-                    stats["fields_updated"] += 1
 
         except Exception as exc:
             log_status = "error"
