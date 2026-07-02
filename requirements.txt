@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# requirements.txt — Automation Test Stability Analytics
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# Upgrade all pins at once (quarterly or before major releases):
+#   pip install --upgrade -r requirements.txt
+#   pip freeze > requirements.txt          # capture new pins
+#   python -m pytest tests/               # verify nothing broke
+#
+# Why pins matter for this project
+# ─────────────────────────────────
+# FlagEmbedding / sentence-transformers change their pooling implementation
+# across minor versions.  An unintentional upgrade can silently shift cosine
+# similarities by 5–15 points, invalidating every cached embedding BLOB in
+# the `embeddings` table.  Pin the model library and bump deliberately.
+#
+# When you do bump FlagEmbedding, run:
+#   python pipeline.py --map-defects --force-reembed --overwrite-mappings
+# to recompute all vectors under the new model version.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+streamlit>=1.35.0,<2.0.0
+plotly>=5.22.0,<7.0.0
+
+# ── Data layer ────────────────────────────────────────────────────────────────
+pandas>=2.2.0,<4.0.0
+numpy>=1.26.0,<3.0.0
+scikit-learn>=1.5.0,<2.0.0
+
+# ── Jira REST API client ──────────────────────────────────────────────────────
+requests>=2.31.0,<3.0.0
+urllib3>=1.26.0,<3.0.0          # requests dependency — pin to avoid SSL breaks
+
+# ── Credential management ─────────────────────────────────────────────────────
+python-dotenv>=1.0.0,<2.0.0
+
+# ── Semantic embedding (optional but strongly recommended) ────────────────────
+#
+# FlagEmbedding pulls in sentence-transformers, transformers, torch, and
+# faiss-cpu.  Recent transformers versions also probe image-processing
+# modules which require torchvision, even for text-only models.
+# If you cannot install torch/torchvision in your environment, comment out
+# this line and use rule-only mode instead.
+#
+# Pin the MINOR version of FlagEmbedding (X.Y.*) because patch releases
+# are safe but minor releases may change pooling / tokenisation behaviour.
+FlagEmbedding>=1.2.0,<2.0.0
+torchvision>=0.24.0,<0.28.0
+
+# ── Standard library (no install needed — listed for documentation only) ──────
+# sqlite3   — built-in
+# xml.etree — built-in
+# json      — built-in
+# pathlib   — built-in
+# logging   — built-in
+# re        — built-in
+# base64    — built-in
