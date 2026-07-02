@@ -1,83 +1,170 @@
-# Synthetic Test Log Generator
+# Automation Test Stability Analytics
 
-Generates realistic Robot Framework XML test reports across multiple CI runs. Useful for testing dashboards, analytics pipelines, or any tooling that consumes `.xml` test result data.
+This project builds a practical analytics and ML workflow for CI test data. It combines synthetic test-log generation, automated ingestion into a SQLite database, a Streamlit dashboard, and ML-driven insights for flaky tests, duration drift, failure clustering, anomaly detection, and Jira defect mapping.
 
-## Files
+## Why this project exists
 
-- `config.py` — all inputs: test definitions, failure behaviour, schedule
-- `generate.py` — core logic that builds XML reports and metadata JSON
+Modern CI pipelines generate large volumes of noisy test data. This project helps teams answer questions such as:
 
-## How it works
+- Which tests are flaky or unstable?
+- Which runs look abnormal?
+- Which tests are becoming slower over time?
+- Which failures are related and should be triaged together?
+- Which Jira defects correspond to which failed test executions?
 
-**`config.py`** has three sections:
+The result is a faster path from raw CI output to actionable debugging and prioritization.
 
-`DEFAULT_CONFIG` sets run-level parameters like team name, number of runs, output directory, start date, interval between runs, anomaly run numbers (where pass rate drops sharply), and the RNG seed.
+## Key features
 
-`TESTS` is a list of 20 test cases. Each test has an id, name, feature/priority tags, a category (`stable`, `flaky-mild`, `flaky-moderate`, `flaky-heavy`, `consistently_failing`), a base failure probability, a duration pattern, and primary/secondary failure types with a probability split.
+- Synthetic test-report generation for realistic Robot Framework-style XML and CI metadata
+- Ingestion of test runs into SQLite for analysis and historical tracking
+- A Streamlit dashboard for run health, drift, failure inspection, and defect mapping
+- ML-focused insights for:
+  - flakiness prediction
+  - duration drift detection
+  - test prioritization
+  - failure clustering
+  - anomaly detection
+- Optional Jira integration for defect ingestion, mapping, and write-back
 
-`DEPENDENCIES` maps tests to upstream tests they depend on. If a dependency fails in a given run, the downstream test's failure probability is raised using:
+## Project structure
 
-```
-effective_fail_prob = 1 - (1 - base_fail_prob) * (1 - weight * failed_dep_count)
-```
+- [generate.py](generate.py) — creates synthetic CI runs and Robot Framework-compatible XML logs
+- [config.py](config.py) — configuration for tests, failure behavior, dependencies, and run generation
+- [pipeline.py](pipeline.py) — ingests run artifacts, builds the analytics database, and supports Jira defect mapping
+- [dashboard.py](dashboard.py) — main Streamlit dashboard entry point
+- [pages/2_ML_Insights.py](pages/2_ML_Insights.py) — ML insights page
+- [ml_pipeline.py](ml_pipeline.py) — ML utilities and reporting helpers
+- [schema.sql](schema.sql) — SQLite schema for runs, test results, defects, and mappings
+- [design_doc.md](design_doc.md) — design notes for the synthetic dataset and ML approach
+- [requirements.txt](requirements.txt) — Python dependencies
 
-Capped at 0.95.
+## Getting started
 
----
+### Prerequisites
 
-**`generate.py`** is structured as follows:
+- Python 3.10+
+- pip
+- A virtual environment is recommended
 
-`gen_*_msg` functions — one per failure type (`timeout`, `element`, `assertion`, `data`, `environment`). Each returns a randomised but realistic error string written into the XML.
-
-`run_pass_rate(n)` — returns the target pass rate for run `n`. Encodes a trend: moderate early → dip mid-run → anomaly spikes → recovery toward the end.
-
-`base_duration / test_duration` — computes per-test execution time. Three tests have special duration shapes (seasonal alternation, a step-change at run 50, progressive drift). Failed tests get extra time added.
-
-`decide_outcome(category, fail_prob, is_anomaly, rng)` — rolls pass/fail for a single test. Anomaly runs push failure probability higher across all categories.
-
-`build_test_xml(...)` — builds the `<test>` XML element with tags, keyword blocks, timestamps, and either a pass status or a structured failure with inner keyword detail.
-
-`build_run(n, config, rng)` — builds a full run:
-1. Rolls natural outcomes for all tests (with dependency model applied)
-2. Corrects the result set so the final pass rate matches the target — forces some tests to flip; flaky tests are preferred when forcing a pass
-3. Calls `build_test_xml` for each test, writes `output.xml` and `ci_metadata.json`
-
-`generate(config)` — outer loop over `num_runs`, calls `build_run`, writes files.
-
-## Output structure
-
-```
-./runs/
-├── TeamAlpha_build_001/
-│   ├── output.xml          # Robot Framework-compatible XML report
-│   └── ci_metadata.json    # Pass/fail counts, pass rate, executor, timestamp
-├── TeamAlpha_build_002/
-│   └── ...
-```
-
-## Usage
+### 1. Clone and install dependencies
 
 ```bash
-# Run with defaults (100 runs → ./runs/)
-python generate.py
+git clone <your-repo-url>
+cd Automation-Test-Stability-Analytics---HPE-CPP3-Jira-Defects-Mapping
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-# Custom options
+> Note: the embedding-based defect matching feature is optional but recommended. If you do not want to install the heavier semantic embedding stack, the pipeline can fall back to rule-based matching.
+
+### 2. Generate sample CI data
+
+```bash
+python generate.py
+```
+
+This creates a set of synthetic run folders under [runs](runs) with XML reports and metadata.
+
+### 3. Ingest the runs into the analytics database
+
+```bash
+python pipeline.py
+```
+
+This creates or updates [analytics.db](analytics.db) using the schema in [schema.sql](schema.sql).
+
+### 4. Launch the dashboards
+
+Run the main dashboard:
+
+```bash
+streamlit run dashboard.py
+```
+
+Run the ML-focused page separately:
+
+```bash
+streamlit run pages/2_ML_Insights.py -- --db ./analytics.db
+```
+
+## Usage examples
+
+### Generate a custom synthetic dataset
+
+```bash
 python generate.py --output-dir ./data --num-runs 50 --start-date 2025-01-01 --interval 12 --seed 7 --team TeamBeta
 ```
 
-| Argument | Default | Description |
-|---|---|---|
-| `--output-dir` | `./runs` | Where to write output folders |
-| `--num-runs` | `100` | Number of CI runs to generate |
-| `--start-date` | `2024-10-01` | Timestamp of run 1 |
-| `--interval` | `24` | Hours between runs |
-| `--seed` | `42` | RNG seed |
-| `--team` | `TeamAlpha` | Team name used in folder names and XML |
+### Ingest a different runs directory
 
-To change test definitions, anomaly behaviour, or dependencies, edit `config.py` — no changes to `generate.py` needed.
-## Dashboard / ML Insights
+```bash
+python pipeline.py --runs-dir ./data --db ./teambeta.db
+```
 
-The app includes a Streamlit dashboard for analytics and a dedicated ML Insights page.
+### Ingest Jira defects from file
 
-- `streamlit run dashboard.py` — main test stability dashboard with run health, drift, inspector, and Jira defect mapping.
-- `streamlit run pages/2_ML_Insights.py -- --db ./analytics.db` — standalone ML Insights page for flakiness prediction, duration drift, failure clustering, and run anomaly detection.
+```bash
+python pipeline.py --ingest-jira ./defects.json
+```
+
+### Run defect-to-test mapping
+
+```bash
+python pipeline.py --map-defects
+```
+
+### Test Jira credentials without ingesting data
+
+```bash
+python pipeline.py --jira-test-connection
+```
+
+## Configuration notes
+
+- [config.py](config.py) controls the synthetic data generation process, including test definitions, failure behavior, dependencies, and anomaly patterns.
+- [schema.sql](schema.sql) defines the database structure used by the ingestion pipeline and dashboard.
+- Jira integration requires environment variables or a local [.env](.env) file with values such as:
+
+```bash
+export JIRA_BASE_URL="https://your-org.atlassian.net"
+export JIRA_EMAIL="your-email@company.com"
+export JIRA_API_TOKEN="your-token"
+```
+
+## How the workflow fits together
+
+1. Synthetic runs are generated from [generate.py](generate.py).
+2. The pipeline ingests those runs into SQLite via [pipeline.py](pipeline.py).
+3. The dashboard visualizes health, trends, and defect mappings.
+4. The ML page surfaces predictive and clustering insights for test stability.
+
+## Support and documentation
+
+Useful references:
+
+- [design_doc.md](design_doc.md) — explains the synthetic data design and ML strategy
+- [schema.sql](schema.sql) — database design and table layout
+- [requirements.txt](requirements.txt) — dependency list and environment guidance
+
+If you run into issues, start by checking the project files above and the CLI help output:
+
+```bash
+python pipeline.py --help
+```
+
+## Contributing
+
+Contributions are welcome. A good workflow is:
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Open a pull request with a short explanation of the improvement
+
+Please keep changes focused, document significant behavior changes, and update relevant docs when needed.
+
+## Maintainers
+
+This repository is intended as a reusable analytics and ML prototype for CI test stability. Contributions and feedback are welcome from anyone working on similar automation reliability problems.
