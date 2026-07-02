@@ -153,18 +153,3 @@ If you run into issues, start by checking the project files above and the CLI he
 ```bash
 python pipeline.py --help
 ```
-
-## Contributing
-
-Contributions are welcome. A good workflow is:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Open a pull request with a short explanation of the improvement
-
-Please keep changes focused, document significant behavior changes, and update relevant docs when needed.
-
-## Maintainers
-
-This repository is intended as a reusable analytics and ML prototype for CI test stability. Contributions and feedback are welcome from anyone working on similar automation reliability problems.
